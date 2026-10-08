@@ -48,6 +48,8 @@ export class Effects {
     this.parent = parent;
     this.time = timeUniform;
     this.items = [];
+    // Additive on dark themes; normal blending on light ones (set by the scene).
+    this.blending = THREE.AdditiveBlending;
   }
 
   add(obj, update) {
@@ -57,7 +59,7 @@ export class Effects {
 
   /** Expanding ring on the ground at (x, z). */
   ripple(x, z, color, scale = 1, delay = 0) {
-    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
+    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, blending: this.blending, depthWrite: false });
     const m = new THREE.Mesh(ringGeo, mat);
     m.position.set(x, 0.2, z);
     const dur = 1.6 * scale;
@@ -78,7 +80,7 @@ export class Effects {
     const mat = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      blending: this.blending,
       uniforms: { uColor: { value: new THREE.Color(color) }, uAlpha: { value: 0 } },
       vertexShader: arcVertex,
       fragmentShader: beamFragment,
@@ -100,7 +102,7 @@ export class Effects {
     const mat = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      blending: this.blending,
       uniforms: { uColor: { value: new THREE.Color(color) }, uAlpha: { value: 0 } },
       vertexShader: arcVertex,
       fragmentShader: beamFragment,
@@ -128,7 +130,7 @@ export class Effects {
     const mat = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      blending: this.blending,
       uniforms: { uProg: { value: 0 }, uColor: { value: new THREE.Color(color) }, uFade: { value: 1 } },
       vertexShader: arcVertex,
       fragmentShader: arcFragment,

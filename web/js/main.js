@@ -21,7 +21,9 @@ import { Scene, cssColor } from './scene.js';
 import { Panel } from './panel.js';
 import { esc, duration, since, clock } from './format.js';
 import { describe } from './feed.js';
-import { SyntheticStream } from './synth.js';
+import { SyntheticStream, syntheticDetail } from './synth.js';
+import { ThemePicker } from './theming.js';
+import { inkOn } from './themes.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -35,16 +37,30 @@ const scene = new Scene($('#viewport'), {
   onPick: (key) => select(key, false),
   onHover: (key, x, y) => hover(key, x, y),
 });
+// ?synthetic=N replaces the collector with N generated agents (scale checks
+// and design work without a cluster).
+const synthetic = Number(new URLSearchParams(window.location.search).get('synthetic')) || 0;
+
 const panel = new Panel($('#panel'), {
   onClose: () => select(null),
   features: () => model.features,
+  detail: synthetic > 0 ? (key) => syntheticDetail(model.agents.get(key)) : undefined,
+});
+
+// Themes: switching re-colors the page (CSS variables), the scene, the open
+// panel and the state-colored feed icons.
+const themes = new ThemePicker($('#themes'), (t) => {
+  scene.setTheme(t);
+  if (selected) panel.show(selected);
+  document.querySelectorAll('#feed .item[data-state] .icon').forEach((el) => {
+    const c = cssColor(el.closest('.item').dataset.state);
+    el.style.setProperty('--c', c);
+    el.style.setProperty('--ci', inkOn(c));
+  });
 });
 
 // ------------------------------------------------------------------ stream
 
-// ?synthetic=N replaces the collector with N generated agents (scale checks
-// without a cluster).
-const synthetic = Number(new URLSearchParams(window.location.search).get('synthetic')) || 0;
 const streamHandlers = {
   onStatus: (s) => {
     const el = $('#conn');
@@ -237,7 +253,8 @@ function feed(item) {
   div.className = `item ${type}`;
   const now = new Date();
   const color = type === 'state' && item.state ? cssColor(item.state) : '';
-  div.innerHTML = `<span class="icon"${color ? ` style="--c:${color}"` : ''}>${FEED_ICON[type]}</span>
+  if (color) div.dataset.state = item.state;
+  div.innerHTML = `<span class="icon"${color ? ` style="--c:${color};--ci:${inkOn(color)}"` : ''}>${FEED_ICON[type]}</span>
     <span class="body"><span class="txt">${item.text}</span><span class="ts" title="${esc(now.toLocaleString())}">${clock(now.toISOString())}</span></span>`;
   if (item.key) {
     div.classList.add('link');
@@ -292,4 +309,4 @@ setInterval(() => {
 }, 1000);
 
 // For debugging and screenshots.
-window.scope = { model, scene, panel, select, stateClass, eventCounts };
+window.scope = { model, scene, panel, select, stateClass, eventCounts, themes };

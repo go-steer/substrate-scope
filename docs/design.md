@@ -91,7 +91,8 @@ On Substrate v0.3.0 authorization only covers atespace calls; every other call i
 - Layout is computed client-side from the snapshot (squarified districts, then a grid inside each), and re-flowed only when atespaces grow past their district.
 - Camera: orbit, pan and zoom (`OrbitControls`), with a "fly to" for search results and selection.
 - Level of detail: district tiles beyond a zoom threshold (milestone 2); agent labels as described above, placed greedily in screen space so they never overlap.
-- `?synthetic=N` swaps the collector stream for N generated agents in the browser, until the collector's simulator exists.
+- `?synthetic=N` swaps the collector stream for N generated agents in the browser, until the collector's simulator exists. It needs no collector at all: the panel's agent details are generated too, so any static file server can serve `web/` for design work.
+- `?theme=<id>` picks a theme (`web/js/themes.js`: one data object per theme for the scene, lights, bloom and the page's CSS variables); `?tour=1` cycles through them.
 - The side panel and filters are HTML over the canvas.
 
 ## Deployment

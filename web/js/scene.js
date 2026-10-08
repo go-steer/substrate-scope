@@ -28,23 +28,11 @@ import { CLASSES, stateClass } from './model.js';
 import { planIsland, slotPosition, SlotTable } from './layout.js';
 import { esc, duration, since, workerLabel } from './format.js';
 import { Effects } from './effects.js';
+import { themeById, classColor, hex } from './themes.js';
 
-/** Base color per visual class; some states tint their class. */
-const CLASS_COLOR = {
-  running: 0x2ee6c5,
-  transition: 0xffb547,
-  suspended: 0x52679a,
-  crashed: 0xff3b5c,
-  pending: 0x9fb2d9,
-};
-const STATE_COLOR = {
-  RESUMING: 0xffd36b,
-  SUSPENDING: 0xff9a3d,
-  PAUSED: 0x6a5aa8,
-  PAUSING: 0xb48cff,
-  DELETING: 0x8a8f99,
-  REVERTING: 0xff7ab8,
-};
+// The active theme (see themes.js). Every state shares its class color: the
+// five class colors of a theme are validated as a set.
+let theme = themeById();
 /** Height of an agent's column per class. */
 const CLASS_HEIGHT = { running: 1.9, transition: 1.0, suspended: 0.16, crashed: 1.1, pending: 0.7 };
 /** Look of each class in the agent shader. */
@@ -57,10 +45,29 @@ const CLASS_LOOK = {
 };
 
 export function stateColor(state) {
-  return STATE_COLOR[state] ?? CLASS_COLOR[stateClass(state)];
+  return hex(cssColor(state));
 }
 export function cssColor(state) {
-  return `#${stateColor(state).toString(16).padStart(6, '0')}`;
+  return classColor(theme, stateClass(state));
+}
+
+const TONE_MAPPING = { none: THREE.NoToneMapping, neutral: THREE.NeutralToneMapping, aces: THREE.ACESFilmicToneMapping, agx: THREE.AgXToneMapping };
+
+/** A vertical gradient for the scene background. */
+function gradientTexture(top, bottom) {
+  const c = document.createElement('canvas');
+  c.width = 4;
+  c.height = 256;
+  const ctx = c.getContext('2d');
+  const g = ctx.createLinearGradient(0, 0, 0, 256);
+  g.addColorStop(0, top);
+  g.addColorStop(0.65, bottom);
+  g.addColorStop(1, bottom);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 4, 256);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }
 
 const AGENT_FOOT = 0.92;
@@ -103,6 +110,14 @@ uniform float uOutline;
 uniform float uEmissive;
 uniform float uBase;
 uniform float uSpeed;
+uniform float uGlow;
+uniform float uAmb;
+uniform float uDiff;
+uniform float uHemi;
+uniform float uGloss;
+uniform float uInk;
+uniform float uOcc;
+uniform vec3 uDimColor;
 varying vec3 vNormal;
 varying vec3 vColor;
 varying vec2 vUv;
@@ -117,27 +132,34 @@ void main() {
   vec3 L = normalize(vec3(0.35, 1.0, 0.45));
   float diff = max(dot(n, L), 0.0);
   float hemi = 0.5 + 0.5 * n.y;
-  vec3 base = vColor * (0.10 + 0.45 * diff + 0.22 * hemi) * uBase;
+  vec3 base = vColor * (uAmb + uDiff * diff + uHemi * hemi) * uBase;
+  // Darker toward the foot: a cheap ambient-occlusion feel.
+  base *= mix(1.0 - uOcc, 1.0, smoothstep(0.0, 0.7, vY));
   float wave = 0.5 + 0.5 * sin(uTime * uSpeed + vSeed * 6.2831);
   float breath = mix(1.0, 0.55 + 0.45 * wave, uBreath);
   float pulse = uPulse * pow(wave, 4.0);
   float top = smoothstep(0.45, 1.0, vY) * step(0.5, 1.0 - abs(n.y - 1.0)) + 0.35 * smoothstep(0.2, 1.0, vY);
-  vec3 glow = vColor * uEmissive * (0.25 + 0.9 * top) * breath;
-  glow += vColor * (pulse * 1.6 + vFlash * 1.6);
+  vec3 glow = vColor * uEmissive * uGlow * (0.25 + 0.9 * top) * breath;
+  glow += vColor * (pulse * 1.6 + vFlash * 1.6) * max(uGlow, 0.4);
   float rim = smoothstep(0.07, 0.0, edge);
-  glow += vColor * rim * (0.12 + uEmissive * 0.8);
+  glow += vColor * rim * (0.12 + uEmissive * 0.8) * uGlow;
   vec3 col = base + glow;
-  col = mix(col, col * 0.08 + vec3(0.012, 0.016, 0.03), vDim);
+  // Light themes: a glossy highlight on the top face and inked edges.
+  float topFace = step(0.9, n.y);
+  col = mix(col, vec3(1.0), topFace * uGloss * smoothstep(0.75, 0.0, length(vUv - vec2(0.28, 0.72))));
+  col = mix(col, col * 0.42, rim * uInk);
+  col = mix(col, uDimColor, vDim * 0.9);
   gl_FragColor = vec4(col, 1.0);
 }`;
 
 /** One InstancedMesh per visual class, with slots that can be added and removed. */
 class Layer {
-  constructor(cls, parent, geometry, timeUniform) {
+  constructor(cls, parent, geometry, timeUniform, look) {
     this.cls = cls;
     this.parent = parent;
     this.geometry = geometry;
-    const look = CLASS_LOOK[cls];
+    const shared = look;
+    look = CLASS_LOOK[cls];
     this.material = new THREE.ShaderMaterial({
       vertexShader: agentVertex,
       fragmentShader: agentFragment,
@@ -150,6 +172,7 @@ class Layer {
         uEmissive: { value: look.emissive },
         uBase: { value: look.base },
         uSpeed: { value: look.speed },
+        ...shared,
       },
     });
     this.keys = [];
@@ -189,6 +212,7 @@ class Layer {
     this.flash = flash;
     mesh.count = this.keys.length;
     mesh.frustumCulled = false;
+    mesh.castShadow = true;
     mesh.userData.layer = this;
     this.mesh = mesh;
     this.capacity = cap;
@@ -324,8 +348,7 @@ export class Scene {
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     container.appendChild(renderer.domElement);
     this.renderer = renderer;
 
@@ -335,8 +358,7 @@ export class Scene {
     this.labelRenderer = labels;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x05080f);
-    scene.fog = new THREE.FogExp2(0x05080f, 0.006);
+    scene.fog = new THREE.FogExp2(0x000000, 0.006);
     this.scene = scene;
 
     const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 2000);
@@ -352,10 +374,31 @@ export class Scene {
     controls.screenSpacePanning = false;
     this.controls = controls;
 
-    scene.add(new THREE.HemisphereLight(0x8fb0ff, 0x0a0d18, 0.9));
-    const sun = new THREE.DirectionalLight(0xdfe8ff, 1.4);
+    this.ambient = new THREE.AmbientLight(0xffffff, 0);
+    scene.add(this.ambient);
+    this.hemi = new THREE.HemisphereLight(0xffffff, 0x000000, 1);
+    scene.add(this.hemi);
+    const sun = new THREE.DirectionalLight(0xffffff, 1);
     sun.position.set(30, 60, 25);
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.radius = 6;
+    sun.shadow.bias = -0.0005;
+    sun.shadow.normalBias = 0.02;
     scene.add(sun);
+    scene.add(sun.target);
+    this.sun = sun;
+
+    // Shared agent-shader uniforms the theme sets.
+    this.look = {
+      uGlow: { value: 1 },
+      uAmb: { value: 0.1 },
+      uDiff: { value: 0.45 },
+      uHemi: { value: 0.22 },
+      uGloss: { value: 0 },
+      uInk: { value: 0 },
+      uOcc: { value: 0 },
+      uDimColor: { value: new THREE.Color() },
+    };
 
     this.world = new THREE.Group();
     scene.add(this.world);
@@ -367,7 +410,7 @@ export class Scene {
     const geo = new THREE.BoxGeometry(AGENT_FOOT, 1, AGENT_FOOT);
     geo.translate(0, 0.5, 0);
     this.layers = {};
-    for (const cls of CLASSES) this.layers[cls] = new Layer(cls, this.agentGroup, geo.clone(), this.time);
+    for (const cls of CLASSES) this.layers[cls] = new Layer(cls, this.agentGroup, geo.clone(), this.time, this.look);
 
     this.effects = new Effects(this.world, this.time);
     this.addBackdrop();
@@ -376,7 +419,7 @@ export class Scene {
     // Worker lines: one LineSegments rebuilt when assignments change.
     this.workerLines = new THREE.LineSegments(
       new THREE.BufferGeometry(),
-      new THREE.LineBasicMaterial({ color: 0x2ee6c5, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false }),
+      new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.22, depthWrite: false }),
     );
     this.workerLines.frustumCulled = false;
     this.world.add(this.workerLines);
@@ -388,6 +431,7 @@ export class Scene {
     composer.addPass(this.bloom);
     composer.addPass(new OutputPass());
     this.composer = composer;
+    this.setTheme(theme);
 
     // Agent label pool.
     this.agentLabels = [];
@@ -420,22 +464,28 @@ export class Scene {
       new THREE.ShaderMaterial({
         transparent: true,
         depthWrite: false,
-        uniforms: { uTime: this.time },
+        uniforms: {
+          uGrid: { value: new THREE.Color() },
+          uGridA: { value: 0.2 },
+          uSea: { value: new THREE.Color() },
+          uSeaA: { value: 0.9 },
+        },
         vertexShader: `varying vec3 vP; void main(){ vec4 w = modelMatrix*vec4(position,1.0); vP = w.xyz; gl_Position = projectionMatrix*viewMatrix*w; }`,
-        fragmentShader: `varying vec3 vP; uniform float uTime;
+        fragmentShader: `varying vec3 vP; uniform vec3 uGrid; uniform float uGridA; uniform vec3 uSea; uniform float uSeaA;
           void main(){
             vec2 g = abs(fract(vP.xz / 4.0 - 0.5) - 0.5) / fwidth(vP.xz / 4.0);
             float line = 1.0 - min(min(g.x, g.y), 1.0);
             float d = length(vP.xz);
             float fade = exp(-d * 0.018);
-            vec3 c = vec3(0.08, 0.14, 0.26) * line * fade * 0.35 + vec3(0.015,0.03,0.06) * fade;
-            gl_FragColor = vec4(c, fade * 0.9);
+            vec3 c = mix(uSea, uGrid, line * uGridA);
+            gl_FragColor = vec4(c, fade * uSeaA);
           }`,
       }),
     );
     sea.rotation.x = -Math.PI / 2;
     sea.position.y = -1.6;
     this.scene.add(sea);
+    this.sea = sea;
 
     // Stars.
     const n = 1400;
@@ -451,19 +501,20 @@ export class Scene {
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    const stars = new THREE.Points(g, new THREE.PointsMaterial({ color: 0x6f86b8, size: 1.6, sizeAttenuation: false, transparent: true, opacity: 0.55, fog: false }));
+    const stars = new THREE.Points(g, new THREE.PointsMaterial({ color: 0xffffff, size: 1.6, sizeAttenuation: false, transparent: true, opacity: 0.55, fog: false }));
     this.scene.add(stars);
+    this.stars = stars;
   }
 
   addSelectionMarker() {
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(0.85, 1.0, 48),
-      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide }),
     );
     ring.rotation.x = -Math.PI / 2;
     const beam = new THREE.Mesh(
       new THREE.CylinderGeometry(0.04, 0.04, 1, 8, 1, true),
-      new THREE.MeshBasicMaterial({ color: 0xbfe9ff, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false }),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, depthWrite: false }),
     );
     const marker = new THREE.Group();
     marker.add(ring);
@@ -474,7 +525,7 @@ export class Scene {
 
     const hover = new THREE.Mesh(
       new THREE.RingGeometry(0.75, 0.85, 40),
-      new THREE.MeshBasicMaterial({ color: 0x9fd8ff, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6, depthWrite: false, side: THREE.DoubleSide }),
     );
     hover.rotation.x = -Math.PI / 2;
     hover.visible = false;
@@ -491,6 +542,81 @@ export class Scene {
     this.bloom.resolution.set(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+  }
+
+  // ---------------------------------------------------------------- theme
+
+  /** The blending for glowing lines and effects: additive only on dark themes. */
+  get blending() {
+    return theme.glow.additive ? THREE.AdditiveBlending : THREE.NormalBlending;
+  }
+
+  /** Applies a theme (see themes.js) without rebuilding the page. */
+  setTheme(t) {
+    theme = t;
+    const sc = t.scene;
+    this.scene.background?.dispose?.();
+    this.scene.background = gradientTexture(sc.backgroundTop, sc.background);
+    this.scene.fog.color.set(sc.fog);
+    this.scene.fog.density = sc.fogDensity;
+    const su = this.sea.material.uniforms;
+    su.uGrid.value.set(sc.grid);
+    su.uGridA.value = sc.gridAlpha;
+    su.uSea.value.set(sc.sea);
+    su.uSeaA.value = sc.seaAlpha;
+    this.stars.visible = !!sc.stars;
+    if (sc.stars) {
+      this.stars.material.color.set(sc.stars);
+      this.stars.material.opacity = sc.starAlpha;
+    }
+
+    const L = t.light;
+    this.renderer.toneMapping = TONE_MAPPING[L.toneMapping] ?? THREE.NeutralToneMapping;
+    this.renderer.toneMappingExposure = L.exposure;
+    this.ambient.color.set(L.ambient);
+    this.ambient.intensity = L.ambientIntensity;
+    this.hemi.color.set(L.hemiSky);
+    this.hemi.groundColor.set(L.hemiGround);
+    this.hemi.intensity = L.hemiIntensity;
+    this.sun.color.set(L.sun);
+    this.sun.intensity = L.sunIntensity;
+    this.sun.castShadow = L.shadow;
+    this.sun.shadow.intensity = L.shadowAlpha;
+    this.renderer.shadowMap.enabled = L.shadow;
+
+    const g = t.glow;
+    this.look.uGlow.value = g.emissive;
+    this.look.uAmb.value = g.ambient;
+    this.look.uDiff.value = g.diffuse;
+    this.look.uHemi.value = g.hemi;
+    this.look.uGloss.value = g.gloss;
+    this.look.uInk.value = g.ink;
+    this.look.uOcc.value = g.occlusion;
+    this.look.uDimColor.value.set(sc.background);
+    // Light themes draw every class at full strength: their suspended color
+    // is already pale.
+    for (const cls of CLASSES) this.layers[cls].material.uniforms.uBase.value = g.additive ? CLASS_LOOK[cls].base : 1;
+
+    this.bloom.enabled = t.bloom.strength > 0;
+    this.bloom.strength = t.bloom.strength;
+    this.bloom.radius = t.bloom.radius;
+    this.bloom.threshold = t.bloom.threshold;
+
+    const blend = this.blending;
+    this.workerLines.material.color.set(t.links.color);
+    this.workerLines.material.blending = blend;
+    this.marker.ring.material.color.set(t.marker.select);
+    this.marker.beam.material.color.set(t.marker.select);
+    this.hoverRing.material.color.set(t.marker.hover);
+    for (const m of [this.marker.ring.material, this.marker.beam.material, this.hoverRing.material]) m.blending = blend;
+    this.effects.blending = blend;
+
+    // Shadows and blending changes need recompiled materials.
+    this.scene.traverse((o) => {
+      for (const m of [o.material].flat()) if (m) m.needsUpdate = true;
+    });
+    // Rebuild the island and recolor every agent.
+    if (this.model) this.replan(false);
   }
 
   // ---------------------------------------------------------------- data
@@ -608,7 +734,7 @@ export class Scene {
       if (ev.type === 'agent_removed') {
         const rec = this.recs.get(key);
         if (rec) {
-          this.effects.ripple(rec.x, rec.z, 0x8090b0, 1.2);
+          this.effects.ripple(rec.x, rec.z, theme.effects.removed, 1.2);
           this.detach(rec);
           this.recs.delete(key);
           this.slots.get(rec.agent.atespace)?.release(key);
@@ -624,7 +750,7 @@ export class Scene {
         }
         rec = this.recs.get(key);
         this.animateHeight(rec, CLASS_HEIGHT[rec.cls], 1.2);
-        if (ev.agent.task) this.effects.beam(rec.x, rec.z, stateColor(ev.agent.state));
+        if (ev.agent.task) this.effects.beam(rec.x, rec.z, theme.effects.beam);
         this.pinLabel(key, CHANGE_LABEL_SECONDS);
         workersChanged = true;
         continue;
@@ -635,25 +761,25 @@ export class Scene {
       switch (ev.type) {
         case 'agent_woke': {
           const top = new THREE.Vector3(rec.x, rec.h + 0.2, rec.z);
-          this.effects.arc(this.towerTop, top, 0x7fe8ff, () => {
+          this.effects.arc(this.towerTop, top, theme.effects.wake, () => {
             this.flash(rec.key);
-            this.effects.ripple(rec.x, rec.z, 0x2ee6c5, 1.4);
+            this.effects.ripple(rec.x, rec.z, theme.states.running, 1.4);
           });
           this.towerPulse = now;
           this.pinLabel(key, CHANGE_LABEL_SECONDS);
           break;
         }
         case 'agent_suspended':
-          this.effects.ripple(rec.x, rec.z, 0x6f8fd8, 1.6);
-          this.effects.ripple(rec.x, rec.z, 0x6f8fd8, 1.6, 0.35);
+          this.effects.ripple(rec.x, rec.z, theme.effects.suspend, 1.6);
+          this.effects.ripple(rec.x, rec.z, theme.effects.suspend, 1.6, 0.35);
           this.pinLabel(key, CHANGE_LABEL_SECONDS);
           break;
         case 'agent_crashed':
-          this.effects.shock(rec.x, rec.z, 0xff3b5c);
+          this.effects.shock(rec.x, rec.z, theme.effects.crash);
           this.pinLabel(key, CHANGE_LABEL_SECONDS * 2);
           break;
         case 'task_updated':
-          if (ev.new) this.effects.beam(rec.x, rec.z, 0x7fe8ff);
+          if (ev.new) this.effects.beam(rec.x, rec.z, theme.effects.beam);
           break;
         case 'worker_assignment':
           workersChanged = true;
@@ -734,9 +860,9 @@ export class Scene {
       g.remove(child);
       child.traverse?.((o) => {
         o.geometry?.dispose();
-        if (o.material) {
-          o.material.map?.dispose();
-          o.material.dispose();
+        for (const m of [o.material].flat()) {
+          m?.map?.dispose();
+          m?.dispose();
         }
         if (o.isCSS2DObject) o.element.remove();
       });
@@ -751,38 +877,60 @@ export class Scene {
     const shape = roundedRect(islandW, islandD, 3.5);
     const slabGeo = new THREE.ExtrudeGeometry(shape, { depth: 1.4, bevelEnabled: true, bevelThickness: 0.35, bevelSize: 0.35, bevelSegments: 3, curveSegments: 12 });
     slabGeo.rotateX(Math.PI / 2);
-    const slab = new THREE.Mesh(slabGeo, new THREE.MeshStandardMaterial({ color: 0x18253f, roughness: 0.8, metalness: 0.2 }));
+    const light = !theme.glow.additive;
+    const blend = this.blending;
+    const slab = new THREE.Mesh(slabGeo, [
+      new THREE.MeshStandardMaterial({ color: theme.island.fill, roughness: light ? 0.9 : 0.8, metalness: light ? 0 : 0.2 }),
+      new THREE.MeshStandardMaterial({ color: theme.island.side, roughness: light ? 0.9 : 0.8, metalness: light ? 0 : 0.2 }),
+    ]);
     slab.position.set(this.island.cx, -0.4, this.island.cz);
+    slab.receiveShadow = true;
     g.add(slab);
+
+    // Shadows cover the island.
+    const span = Math.max(islandW, islandD) * 0.75 + 6;
+    const cam = this.sun.shadow.camera;
+    cam.left = -span;
+    cam.right = span;
+    cam.top = span;
+    cam.bottom = -span;
+    cam.near = 1;
+    cam.far = 400;
+    cam.updateProjectionMatrix();
+    this.sun.target.position.set(this.island.cx, 0, this.island.cz);
+    // From the front left, so shadows fall to the right where the camera sees them.
+    this.sun.position.set(this.island.cx - 70, 80, this.island.cz + 35);
 
     // Glowing rim around the top edge.
     const rimPts = shape.getPoints(96).map((p) => new THREE.Vector3(p.x + this.island.cx, 0.0, p.y + this.island.cz));
     rimPts.push(rimPts[0].clone());
     const rim = new THREE.Line(
       new THREE.BufferGeometry().setFromPoints(rimPts),
-      new THREE.LineBasicMaterial({ color: 0x3d7bd9, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending }),
+      new THREE.LineBasicMaterial({ color: theme.island.edge, transparent: true, opacity: theme.island.edgeAlpha, blending: blend }),
     );
     g.add(rim);
 
     // Cluster name along the front edge.
-    const name = textPlane(clusterName || 'cluster', { size: 1.5, color: '#4d6aa6' });
+    const name = textPlane(clusterName || 'cluster', { size: 1.5, color: theme.island.label });
     name.material.opacity = 0.75;
     name.position.set(this.island.cx - islandW / 2 + 2.4 + name.geometry.parameters.width / 2, 0.03, this.island.cz + islandD / 2 - 1.3);
     g.add(name);
 
     // Districts.
     for (const d of districts.values()) {
-      const hue = 0.55 + (hashString(d.name) - 0.5) * 0.25;
-      const tileColor = new THREE.Color().setHSL(hue, 0.3, 0.085);
+      // A small per-district hue shift so neighbours read apart.
+      const jitter = (hashString(d.name) - 0.5) * theme.district.fillJitter;
+      const tileColor = new THREE.Color(theme.district.fill).offsetHSL(jitter, 0, 0);
       const tile = new THREE.Mesh(
         new THREE.BoxGeometry(d.w, 0.12, d.d),
-        new THREE.MeshStandardMaterial({ color: tileColor, roughness: 0.7, metalness: 0.2 }),
+        new THREE.MeshStandardMaterial({ color: tileColor, roughness: light ? 0.9 : 0.7, metalness: light ? 0 : 0.2 }),
       );
       tile.position.set(d.x + d.w / 2, 0.06, d.z + d.d / 2);
+      tile.receiveShadow = true;
       g.add(tile);
       const edges = new THREE.LineSegments(
         new THREE.EdgesGeometry(new THREE.BoxGeometry(d.w + 0.04, 0.16, d.d + 0.04)),
-        new THREE.LineBasicMaterial({ color: new THREE.Color().setHSL(hue, 0.7, 0.5), transparent: true, opacity: 0.45, blending: THREE.AdditiveBlending }),
+        new THREE.LineBasicMaterial({ color: new THREE.Color(theme.district.edge).offsetHSL(jitter, 0, 0), transparent: true, opacity: theme.district.edgeAlpha, blending: blend }),
       );
       edges.position.copy(tile.position);
       g.add(edges);
@@ -794,7 +942,7 @@ export class Scene {
       }
       const dotGeo = new THREE.BufferGeometry();
       dotGeo.setAttribute('position', new THREE.Float32BufferAttribute(dots, 3));
-      g.add(new THREE.Points(dotGeo, new THREE.PointsMaterial({ color: new THREE.Color().setHSL(hue, 0.4, 0.35), size: 0.12, transparent: true, opacity: 0.6 })));
+      g.add(new THREE.Points(dotGeo, new THREE.PointsMaterial({ color: theme.district.dots, size: 0.12, transparent: true, opacity: 0.8 })));
 
       const div = document.createElement('div');
       div.className = 'district-label';
@@ -811,20 +959,21 @@ export class Scene {
     const tower = new THREE.Group();
     const shaft = new THREE.Mesh(
       new THREE.CylinderGeometry(0.3, 0.75, 7, 6),
-      new THREE.MeshStandardMaterial({ color: 0x1c2b4a, roughness: 0.4, metalness: 0.6, emissive: 0x0b1a33 }),
+      new THREE.MeshStandardMaterial({ color: theme.router.shaft, roughness: light ? 0.6 : 0.4, metalness: light ? 0.1 : 0.6, emissive: theme.router.emissive }),
     );
     shaft.position.y = 3.5;
+    shaft.castShadow = true;
     tower.add(shaft);
     for (let i = 1; i <= 3; i++) {
       const band = new THREE.Mesh(
         new THREE.TorusGeometry(0.75 - i * 0.12, 0.05, 6, 24),
-        new THREE.MeshBasicMaterial({ color: 0x5fb8ff }),
+        new THREE.MeshBasicMaterial({ color: theme.router.band }),
       );
       band.rotation.x = Math.PI / 2;
       band.position.y = i * 1.8;
       tower.add(band);
     }
-    const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.38, 20, 14), new THREE.MeshBasicMaterial({ color: 0x9fdcff }));
+    const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.38, 20, 14), new THREE.MeshBasicMaterial({ color: theme.router.beacon }));
     beacon.position.y = 7.4;
     tower.add(beacon);
     const tdiv = document.createElement('div');
@@ -837,6 +986,7 @@ export class Scene {
     g.add(tower);
     this.towerTop = new THREE.Vector3(tx, 7.4, tz);
     this.beacon = beacon;
+    this.beaconColor = new THREE.Color(theme.router.beacon);
   }
 
   /**
@@ -926,19 +1076,21 @@ export class Scene {
         const group = new THREE.Group();
         const pad = new THREE.Mesh(
           new THREE.BoxGeometry(3.2, 0.3, 1.8),
-          new THREE.MeshStandardMaterial({ color: 0x1b2c4c, roughness: 0.45, metalness: 0.5, emissive: 0x08162c }),
+          new THREE.MeshStandardMaterial({ roughness: 0.45, metalness: 0.5 }),
         );
         pad.position.y = 0.15;
+        pad.castShadow = true;
+        pad.receiveShadow = true;
         group.add(pad);
         const padEdges = new THREE.LineSegments(
           new THREE.EdgesGeometry(new THREE.BoxGeometry(3.24, 0.32, 1.84)),
-          new THREE.LineBasicMaterial({ color: 0x4f8fe0, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending }),
+          new THREE.LineBasicMaterial({ transparent: true, opacity: 0.55 }),
         );
         padEdges.position.y = 0.15;
         group.add(padEdges);
         const glow = new THREE.Mesh(
           new THREE.PlaneGeometry(2.8, 1.4),
-          new THREE.MeshBasicMaterial({ color: 0x2ee6c5, transparent: true, opacity: 0.0, blending: THREE.AdditiveBlending, depthWrite: false }),
+          new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.0, depthWrite: false }),
         );
         glow.rotation.x = -Math.PI / 2;
         glow.position.y = 0.31;
@@ -949,7 +1101,7 @@ export class Scene {
         label.position.set(0, 0.2, 1.75);
         group.add(label);
         this.world.add(group);
-        w = { group, glow, label };
+        w = { group, pad, padEdges, glow, label };
         this.workers.set(wk.name, w);
       }
       const row = Math.floor(i / perRow);
@@ -959,8 +1111,15 @@ export class Scene {
       const z = this.workerRowZ + row * 3;
       w.group.position.set(x, 0, z);
       const running = hosted.get(wk.name) || 0;
-      w.glow.material.opacity = running ? 0.06 + Math.min(running, 8) * 0.02 : 0.0;
-      w.glow.material.color.set(wk.state === 'DRAINING' ? 0xffb547 : 0x2ee6c5);
+      const light = !theme.glow.additive;
+      w.pad.material.color.set(running ? theme.worker.pad : theme.worker.idle);
+      w.pad.material.roughness = light ? 0.85 : 0.45;
+      w.pad.material.metalness = light ? 0 : 0.5;
+      w.padEdges.material.color.set(theme.worker.padEdge);
+      w.padEdges.material.blending = this.blending;
+      w.glow.material.blending = this.blending;
+      w.glow.material.opacity = running ? (0.06 + Math.min(running, 8) * 0.02) * (light ? 2.5 : 1) : 0.0;
+      w.glow.material.color.set(wk.state === 'DRAINING' ? theme.worker.draining : theme.worker.active);
       w.label.visible = list.length <= 16;
       w.label.element.innerHTML = `<div class="name">${esc(workerLabel(wk))}</div><div class="meta">${running} actor${running === 1 ? '' : 's'}${wk.state && wk.state !== 'ACTIVE' ? ' · ' + esc(wk.state.toLowerCase()) : ''}</div>`;
       w.pos = new THREE.Vector3(x, 0.32, z);
@@ -979,7 +1138,8 @@ export class Scene {
     g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
     // Many lines add up; keep the bundle faint as it grows.
     const n = pts.length / 6;
-    this.workerLines.material.opacity = Math.min(0.24, Math.max(0.035, 0.24 * Math.sqrt(12 / Math.max(n, 1))));
+    const a = theme.links.alpha;
+    this.workerLines.material.opacity = Math.min(a, Math.max(a * 0.15, a * Math.sqrt(12 / Math.max(n, 1))));
     g.computeBoundingSphere();
   }
 
@@ -1121,7 +1281,7 @@ export class Scene {
       const since = this.towerPulse !== undefined ? t - this.towerPulse : 99;
       const k = 0.8 + 0.2 * Math.sin(t * 2) + 2.5 * Math.exp(-since * 2.5);
       this.beacon.scale.setScalar(0.8 + 0.25 * k);
-      this.beacon.material.color.setRGB(0.55 * k, 0.85 * k, 1.0 * k);
+      this.beacon.material.color.copy(this.beaconColor).multiplyScalar(theme.glow.additive ? k : 0.7 + 0.3 * Math.min(k, 1.4));
     }
 
     this.effects.update(t);
