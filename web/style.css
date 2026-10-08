@@ -142,6 +142,11 @@ body {
   font-weight: 700;
   font-size: 15px;
   letter-spacing: 0.02em;
+  /* The wordmark: a brand gradient in some themes, the text color in others. */
+  background: var(--wordmark);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 .title .thin {

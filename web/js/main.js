@@ -240,6 +240,14 @@ function setFeedCollapsed(on) {
   }
   if (!on) feedUnread = 0;
   updateFeedCounts();
+  scene.setLeftInset(feedInset());
+}
+
+/** Width the open events panel covers, for framing the island beside it. */
+function feedInset() {
+  if (feedCollapsed()) return 0;
+  const r = $('#feedpanel').getBoundingClientRect();
+  return r.right + 12;
 }
 
 function updateFeedCounts() {
@@ -272,6 +280,7 @@ function feed(item) {
   updateFeedCounts();
 }
 
+scene.setLeftInset(feedInset());
 $('#feed-collapse').addEventListener('click', () => setFeedCollapsed(true));
 $('#feed-tab').addEventListener('click', () => setFeedCollapsed(false));
 try {

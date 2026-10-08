@@ -22,7 +22,7 @@ function leaves(o, prefix = '') {
 }
 
 test('every theme defines every token, and nothing else', () => {
-  assert.equal(THEMES.length, 6);
+  assert.equal(THEMES.length, 8);
   for (const t of THEMES) {
     for (const path of TOKENS) {
       const v = token(t, path);
@@ -51,6 +51,8 @@ const VALIDATED = {
   'cotton-candy': ['#fbf4ff', '#7b3fe4', '#a87a00', '#d11f6f', '#cdbfe6', '#ff5fa2'],
   'riso-paper': ['#f6f1e7', '#009a93', '#3a5bd9', '#e5392b', '#c9c0b0', '#ff48b0'],
   glacier: ['#eef4fb', '#0062e6', '#9a7a00', '#d11f6f', '#b7c6da', '#7c3aed'],
+  'google-light': ['#f8f9fa', '#188038', '#9334e6', '#d93025', '#bdc1c6', '#1a73e8'],
+  'google-dark': ['#202124', '#34a853', '#af5cf7', '#e52592', '#5f6368', '#8ab4f8'],
 };
 
 test('state colors are the validated palettes', () => {

@@ -1145,11 +1145,26 @@ export class Scene {
 
   // --------------------------------------------------------------- camera
 
+  /** Pixels on the left covered by the events panel (the fit keeps clear of them). */
+  setLeftInset(px) {
+    this.leftInset = px;
+  }
+
   fitCamera() {
+    // Frame the island in the part of the view the events panel leaves
+    // free: pull back to fit the narrower width and shift the target left
+    // so the island (and the router tower on its left edge) clears the panel.
+    const W = this.renderer.domElement.clientWidth || window.innerWidth;
+    const inset = Math.min(this.leftInset || 0, W * 0.4);
     const span = Math.max(this.island.width, this.island.depth * 1.5);
-    const dist = Math.max(26, span * 0.95);
-    this.controls.target.set(this.island.cx, 0, this.island.cz + 0.5);
-    this.camera.position.set(this.island.cx + dist * 0.1, dist * 0.56, this.island.cz + dist * 0.84);
+    const dist = Math.max(26, span * 0.95) * (W / (W - inset));
+    const viewW = 2 * dist * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) * this.camera.aspect;
+    const cx = this.island.cx - (inset / 2 / W) * viewW;
+    // Aim a little toward the front edge when pulled back, so the island
+    // uses the empty sky above it.
+    const cz = this.island.cz + 0.5 + (inset ? this.island.depth * 0.05 : 0);
+    this.controls.target.set(cx, 0, cz);
+    this.camera.position.set(cx + dist * 0.1, dist * 0.56, cz + dist * 0.84);
     this.controls.update();
   }
 
