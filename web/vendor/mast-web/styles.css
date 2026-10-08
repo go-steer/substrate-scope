@@ -1,0 +1,1641 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  /* Go brand palette — see docs/color-palette.md */
+  --gopher-blue: #00add8;
+  --light-blue: #5dc9e2;
+  --aqua: #00a29c;
+  --deep-teal: #00758d;
+  --fuchsia: #ce3262;
+  --brand-yellow: #fddd00;
+  --cool-gray: #dbd9d6;
+  --slate: #555759;
+  --plum: #402b56;
+  --bg: #202124; /* charcoal — chat area */
+  --bg-surface: #0a1418; /* panes and bars sitting on top of --bg */
+  --bg-elevated: #0f1f25; /* inputs, buttons, code blocks */
+  --border: var(--gopher-blue);
+  --border-soft: var(--deep-teal); /* internal dividers where strong blue would be too noisy */
+  --text: var(--cool-gray);
+  --text-dim: #8a9499;
+  --accent: var(--gopher-blue);
+  --green: var(--aqua);
+  --red: var(--fuchsia);
+  --yellow: var(--brand-yellow);
+
+  /* The semantic blue slot, and the only one anything outside this block
+     should paint text with. The nine Go brand colors above are fixed
+     pigments — no theme overrides them — so a rule that reaches for
+     --light-blue directly paints pale cyan on every background, including
+     the near-white ones. Every theme sets --blue. */
+  --blue: var(--light-blue);
+
+  /* Terminal chrome (see "Terminal chrome" section below). Glow and
+     frame colors are derived from --accent per-theme on `body`, so a
+     theme only has to set --accent to get a coherent bezel. These two
+     knobs control how hot that derivation runs; light themes dial
+     them down (a neon halo on paper reads as a printing defect). */
+  --glow-amt: 34%;
+  --frame-amt: 46%;
+  --scan: rgb(255 255 255 / 2.5%);
+
+  /* Panel hue slots. The spatial shell colors each terminal from one of
+     four slots. They default to the status palette so existing themes
+     are unchanged, but a theme can now recolor terminals without
+     dragging every "connected" dot and error line along with them. */
+  --hue-1: var(--accent);
+  --hue-2: var(--green);
+  --hue-3: var(--yellow);
+  --hue-4: var(--red);
+
+  /* Gemini Aurora. One gradient, spent sparingly on the active terminal
+     and the wordmark; its stops are also what the Google themes hand to
+     the four hue slots above. */
+  --aurora: linear-gradient(90deg, #217bfe 0%, #078efb 33%, #a770ef 66%, #ff5e62 100%);
+  --aurora-1: #217bfe;
+  --aurora-2: #078efb;
+  --aurora-3: #a770ef;
+  --aurora-4: #ff5e62;
+  --brand-image: none;
+  --brand-color: var(--accent);
+
+  /* Room lighting model, consumed only by spatial.css. The defaults
+     below reproduce the current dark room verbatim, so a theme that
+     says nothing about the room still gets the neon one.
+
+     Only hue-independent knobs belong here. A custom property's own
+     var() references are resolved on the element that *declares* it,
+     not where it is used — so anything mentioning the per-panel --hue
+     has to be declared on .panel / .panel-cast (see the companion
+     blocks under each theme below), or it computes to nothing. */
+  --room-core: #0a1a22;
+  --room-mid: #04070a;
+  --room-edge: #000;
+  --room-vignette: rgb(0 0 0 / 72%);
+  --room-surface: rgb(0 0 0 / 94%);
+  --room-surface-bar: rgb(0 0 0 / 70%);
+  --room-on-hue: #000;
+  --room-tint: 6%;
+  --room-tint-bar: 22%;
+  --cast-opacity: 0.55;
+  --cast-opacity-active: 0.85;
+
+  /* Aerial perspective. A distant panel is seen through more of the
+     room, so it drifts toward the room's own colour — the oldest depth
+     cue there is, and the one that makes a flat-lit CSS scene read as
+     having air in it. --room-fog is what a panel dissolves *into*
+     (the backdrop's mid stop); --fog-max is how completely. */
+  --room-fog: var(--room-mid);
+  --fog-max: 0.62;
+
+  /* The travelling highlight on a focused panel's glass, and how bright
+     the boot flash burns. Both are "light on a surface", so both go up
+     in a dark room and nearly vanish on paper. */
+  --sheen: rgb(255 255 255 / 8%);
+  --flash: rgb(255 255 255 / 70%);
+
+  /* How far a non-focused terminal falls back into the room. Fading
+     toward black hides a panel much faster than fading toward white
+     does the reverse, so light rooms hold theirs higher. */
+  --panel-recede: 0.42;
+  --panel-recede-busy: 0.72;
+}
+
+/* ─── Themes (v0.3.0 PR 7) ──────────────────────────────────────────
+   Themes are CSS-variable overrides applied to <body data-theme="…">.
+   The default palette above is used when data-theme is unset or
+   "default". Each theme block below overrides the palette variables
+   only — layout, typography, spacing, everything else stays the
+   same. Ported concept from cogo-wasm2's theme picker.
+
+   Persistence lives in web/theme.js; the /theme command that drives it
+   is registered in web/shell.js. */
+
+body[data-theme='solarized-dark'] {
+  --bg: #002b36;
+  --bg-surface: #073642;
+  --bg-elevated: #073642;
+  --text: #93a1a1;
+  --text-dim: #586e75;
+  --border: #268bd2;
+  --border-soft: #586e75;
+  --accent: #268bd2;
+  --green: #859900;
+  --red: #dc322f;
+  --yellow: #b58900;
+  --blue: #268bd2;
+}
+
+body[data-theme='solarized-light'] {
+  --bg: #fdf6e3;
+  --bg-surface: #eee8d5;
+  --bg-elevated: #eee8d5;
+  --text: #586e75;
+  --text-dim: #93a1a1;
+  --border: #268bd2;
+  --border-soft: #93a1a1;
+  --accent: #268bd2;
+  --green: #859900;
+  --red: #dc322f;
+  --yellow: #b58900;
+  --blue: #268bd2;
+
+  /* Light background: a neon halo reads as a printing defect. */
+  --glow-amt: 13%;
+  --frame-amt: 34%;
+  --scan: rgb(0 0 0 / 1.5%);
+}
+
+/* Hard edges only — a halo would blur the border this theme exists
+   to keep crisp, and the scanline eats contrast. */
+body[data-theme='high-contrast'] {
+  --glow-amt: 0%;
+  --frame-amt: 100%;
+  --scan: transparent;
+  --bg: #000;
+  --bg-surface: #000;
+  --bg-elevated: #111;
+  --text: #fff;
+  --text-dim: #ccc;
+  --border: #fff;
+  --border-soft: #888;
+  --accent: #0ff;
+  --green: #0f0;
+  --red: #f33;
+  --yellow: #ff0;
+  --blue: #0af;
+}
+
+/* Grayscale everything except errors + warnings — reduces palette
+   fatigue in long sessions without sacrificing at-a-glance error
+   surface. */
+body[data-theme='mono'] {
+  --bg: #1a1a1a;
+  --bg-surface: #101010;
+  --bg-elevated: #262626;
+  --text: #d4d4d4;
+  --text-dim: #8a8a8a;
+  --border: #4a4a4a;
+  --border-soft: #333;
+  --accent: #d4d4d4;
+  --green: #7a7a7a;
+
+  /* Lighter than --green even though mono flattens the palette: --blue is
+     the slot the status line, inline code and table headers paint text
+     with, and #7a7a7a is dimmer than --text-dim. */
+  --blue: #a8a8a8;
+  --red: #d3574d;
+  --yellow: #d9c467;
+}
+
+body[data-theme='paper'] {
+  --bg: #faf8f2;
+  --bg-surface: #f2eee5;
+  --bg-elevated: #e8e2d4;
+  --text: #2b2b2b;
+  --text-dim: #6a6a6a;
+  --border: #005c8a;
+  --border-soft: #b3b3b3;
+  --accent: #005c8a;
+  --green: #2b7a2b;
+  --red: #b0263a;
+  --yellow: #8a6a00;
+  --blue: #005c8a;
+  --glow-amt: 13%;
+  --frame-amt: 34%;
+  --scan: rgb(0 0 0 / 1.5%);
+}
+
+/* ─── Google palettes + Gemini Aurora ───────────────────────────────
+   The room chrome stays grayscale (Google Material greys); the color
+   budget is spent entirely on the terminals, which take one Aurora
+   stop each. See google-colors.md. */
+
+body[data-theme='grayscale-dark'] {
+  --bg: #202124; /* Grey 900 */
+  --bg-surface: #1a1b1e;
+  --bg-elevated: #2a2b2e;
+  --border: #3c4043; /* Grey 800 */
+  --border-soft: #5f6368; /* Grey 700 */
+  --text: #e8eaed; /* Grey 200 */
+  --text-dim: #9aa0a6; /* Grey 500 */
+  --accent: #bdc1c6; /* Grey 400 — the room stays grey … */
+  --green: #81c995;
+  --red: #f28b82;
+  --yellow: #fdd663;
+  --blue: #8ab4f8;
+
+  /* … and the color lives in the terminals. */
+  --hue-1: var(--aurora-1);
+  --hue-2: var(--aurora-2);
+  --hue-3: var(--aurora-3);
+  --hue-4: var(--aurora-4);
+  --brand-image: var(--aurora);
+  --brand-color: transparent;
+  --glow-amt: 20%;
+  --frame-amt: 40%;
+  --scan: rgb(255 255 255 / 1.8%);
+  --room-core: #2a2b2e;
+  --room-mid: #202124;
+  --room-edge: #121212;
+  --room-vignette: rgb(0 0 0 / 58%);
+  --room-surface: rgb(18 18 18 / 94%);
+  --room-surface-bar: rgb(32 33 36 / 82%);
+
+  /* White, not Grey 900. Every Aurora theme puts white type on the
+     gradient, because dark lettering fights it — the stops are
+     saturated enough that near-black reads as a hole punched in the
+     sweep rather than as text on it. See the note in the Pantheon
+     block: this is a deliberate trade against a contrast measurement. */
+  --room-on-hue: #fff;
+}
+
+body[data-theme='grayscale-light'] {
+  --bg: #f8f9fa; /* Grey 50 */
+  --bg-surface: #fff;
+  --bg-elevated: #f1f3f4;
+  --border: #dadce0; /* Grey 300 */
+  --border-soft: #bdc1c6; /* Grey 400 — Grey 300 vanishes on a white HUD */
+  --text: #202124;
+  --text-dim: #5f6368;
+  --accent: #5f6368; /* Grey 700 */
+  --green: #188038;
+  --red: #d50000;
+  --yellow: #dc6d00;
+  --blue: #1a73e8;
+  --hue-1: var(--aurora-1);
+  --hue-2: var(--aurora-2);
+  --hue-3: var(--aurora-3);
+  --hue-4: var(--aurora-4);
+  --brand-image: var(--aurora);
+  --brand-color: transparent;
+  --glow-amt: 13%;
+  --frame-amt: 34%;
+  --scan: transparent;
+}
+
+/* Google Cloud's brand palette rather than the console's: it builds
+   from white, and its accent is Blue 500 instead of a neutral grey. */
+body[data-theme='cloud-light'] {
+  --bg: #f8f9fc; /* Google Grey 10 */
+  --bg-surface: #fff; /* "build from white" — panels are pure white */
+  --bg-elevated: #eef1f8;
+  --border: #dadce0;
+  --border-soft: #b9bfcc; /* a Grey 300 hairline vanishes on a white HUD */
+  --text: #212226; /* Google Grey 1000; the brand avoids pure black */
+  --text-dim: #5f6368;
+  --accent: #3186ff; /* Google Blue 500 */
+
+  /* Brand Green/Red/Yellow 500 (#00af57 / #fc413d / #fec700) are fill
+     colours — as text on white they run 2.5–3.5:1 and fail WCAG AA.
+     These four vars drive error lines, warning text and connection
+     labels, so they take the accessible Pantheon equivalents; the
+     brand tones stay where they belong, on fills and accents. */
+  --green: #188038;
+  --red: #d50000;
+  --yellow: #dc6d00;
+  --blue: #1a73e8;
+
+  /* Where the grayscale pair gives every terminal an Aurora stop, this
+     one is a Google theme first: the roster is Blue, Red, Green and a
+     Gemini-leaning violet, and the Aurora is held back for whichever
+     terminal is active (its bar, edge and floor pool) plus the
+     wordmark. Weights are the GM2 600/700 tones, not the brand 500s:
+     --hue is real text here (.panel's colour, the SEND label, the
+     title bar), and every 500 fails AA on white — these four run
+     4.5-5.4:1, so they are also a legibility gain on the Aurora stops
+     they replace. */
+  --hue-1: #1a73e8; /* Google Blue 600 */
+  --hue-2: #d93025; /* Google Red 600 */
+  --hue-3: #188038; /* Google Green 700 */
+  --hue-4: #9334e6; /* Google Purple 600 — echoes the Aurora amethyst */
+  --brand-image: var(--aurora);
+  --brand-color: transparent;
+  --glow-amt: 13%;
+  --frame-amt: 30%;
+  --scan: transparent;
+
+  /* Softened, so the grid reads as Cloud rather than as a blue cage.
+     The horizon tint is a companion rule below — the shared light-room
+     block would outrank it here. */
+  --grid-line: color-mix(in srgb, var(--accent) 26%, var(--border));
+}
+
+/* ─── Pantheon (Cloud Console) ───────────────────────────────────────
+   The console's own UI palette, which is GM2 with dashboard-specific
+   contrast tweaks — Blue 600 in light, Blue 300 in dark, elevation by
+   grey rather than by shadow. Both variants take the third Aurora
+   treatment: see the companion block below. */
+
+body[data-theme='pantheon-light'] {
+  --bg: #f8f9fa; /* page background */
+  --bg-surface: #fff; /* panels and containers */
+  --bg-elevated: #e8f0fe; /* the console's focus tint */
+  --border: #dadce0;
+  --border-soft: #bdc1c6; /* the #e8eaed secondary divider is invisible here */
+  --text: #202124; /* Grey 900 */
+  --text-dim: #5f6368; /* Grey 700 */
+  --accent: #1a73e8; /* Blue 600 — primary / focus */
+  --green: #188038;
+  --red: #d50000;
+  --yellow: #dc6d00;
+  --blue: #1a73e8;
+  --hue-1: var(--aurora-1);
+  --hue-2: var(--aurora-2);
+  --hue-3: var(--aurora-3);
+  --hue-4: var(--aurora-4);
+  --brand-image: var(--aurora);
+  --brand-color: transparent;
+  --glow-amt: 13%;
+  --frame-amt: 30%;
+  --scan: transparent;
+  --grid-line: color-mix(in srgb, var(--accent) 20%, var(--border));
+}
+
+body[data-theme='pantheon-dark'] {
+  /* Elevation by lighter grey, not by shadow — the console has no drop
+     shadows in dark mode, so the only thing that says "this is on top"
+     is that it is paler: #202124 canvas, #2a2b2e cards, #303134 above
+     them. This is the inverse of how the other dark themes here work
+     (surfaces darker than the page) and it is the point of the theme. */
+  --bg: #202124;
+  --bg-surface: #2a2b2e;
+  --bg-elevated: #303134;
+  --border: #3c4043; /* Grey 800 */
+  --border-soft: #5f6368;
+  --text: #e8eaed; /* Grey 200 */
+  --text-dim: #9aa0a6; /* Grey 500 */
+
+  /* 300-level everything: the console drops high-saturation colour in
+     dark mode because it goes harsh against the greys. */
+  --accent: #8ab4f8; /* Blue 300 */
+  --green: #81c995;
+  --red: #f28b82;
+  --yellow: #fdd663;
+  --blue: #8ab4f8;
+  --hue-1: var(--aurora-1);
+  --hue-2: var(--aurora-2);
+  --hue-3: var(--aurora-3);
+  --hue-4: var(--aurora-4);
+  --brand-image: var(--aurora);
+  --brand-color: transparent;
+  --glow-amt: 18%;
+  --frame-amt: 38%;
+  --scan: rgb(255 255 255 / 1.6%);
+
+  /* The room reads bottom-up too: #121212 backing at the horizon, the
+     Grey 900 canvas across the middle, cards floating a shade paler. */
+  --room-core: #2a2b2e;
+  --room-mid: #202124;
+  --room-edge: #121212;
+  --room-vignette: rgb(0 0 0 / 60%);
+  --room-surface: rgb(42 43 46 / 94%);
+  --room-surface-bar: rgb(48 49 52 / 88%);
+
+  /* "On primary" — white across every Aurora theme, matching Cloud.
+     The console's own answer is Grey 900, and against these stops a
+     near-black is also the better *measurement* (4.7-6.3:1, where
+     white runs 2.98-3.96:1 and misses AA, since a 10px bold title is
+     not WCAG "large" text). It is the worse *result*: dark lettering
+     punches a hole in the gradient instead of sitting on it. Chosen
+     with the numbers on the table. If it needs rescuing later, a
+     text-shadow behind the title buys legibility without touching the
+     colour. */
+  --room-on-hue: #fff;
+
+  /* Same reasoning as the light variant: the slice is the point, so the
+     pools stay strong and the unfocused terminals stay present. */
+  --cast-opacity: 0.72;
+  --cast-opacity-active: 0.95;
+  --panel-recede: 0.8;
+  --panel-recede-busy: 0.94;
+}
+
+/* Companion block: everything the Aurora themes change about a panel
+   or its floor cast has to be declared *on* those elements, because
+   .panel is where --hue exists and because a declaration on the element
+   itself always beats one inherited from <body>. */
+body:is(
+    [data-theme='grayscale-dark'],
+    [data-theme='grayscale-light'],
+    [data-theme='cloud-light'],
+    [data-theme='pantheon-light'],
+    [data-theme='pantheon-dark']
+  )
+  :is(.panel, .panel-cast) {
+  --panel-edge-active: var(--aurora);
+  --bar-fill-active: var(--aurora);
+  --cast-fill-active: var(--aurora);
+
+  /* Matches the grazing-angle falloff of the default radial cast; the
+     gradient supplies the color, the mask supplies the shape. */
+  --cast-mask-active: radial-gradient(
+    ellipse 42% 100% at 50% 50%,
+    #000 0%,
+    rgb(0 0 0 / 62%) 38%,
+    transparent 100%
+  );
+}
+
+/* box-shadow cannot take a gradient, so the active panel's Aurora edge
+   is approximated by three directional casts: blue off the left edge,
+   coral off the right, amethyst behind. */
+body:is([data-theme='grayscale-dark'], [data-theme='pantheon-dark']) .panel {
+  --panel-shadow-active:
+    -20px 0 36px color-mix(in srgb, var(--aurora-1) 45%, transparent),
+    20px 0 36px color-mix(in srgb, var(--aurora-4) 40%, transparent),
+    0 0 76px color-mix(in srgb, var(--aurora-3) 26%, transparent),
+    inset 0 0 30px rgb(255 255 255 / 6%);
+}
+
+/* Themes 1 and 4 give each terminal a single flat colour — one Aurora
+   stop, or one Google primary. Pantheon takes the third route: every
+   terminal wears a *slice* of the Aurora, running from its own slot
+   into the next one's, so the four of them read as one gradient
+   wrapped around the room rather than as four unrelated colours. The
+   whole four-stop sweep stays reserved for the active terminal. */
+body:is([data-theme='pantheon-light'], [data-theme='pantheon-dark']) :is(.panel, .panel-cast) {
+  /* Corner to corner: across a 440×320 panel a horizontal sweep spends
+     most of its travel behind the title bar, where it can't be read as
+     a gradient at all. 4px because 2px of gradient at room distance is
+     a coloured line, not a gradient. */
+  --panel-border-w: 4px;
+  --panel-edge: linear-gradient(135deg, var(--hue) 0%, var(--hue-next) 100%);
+
+  /* Every title bar is filled with its slice at full strength, not a
+     tint of it — the console fills its own headers, and a wash only
+     reads once you're already looking at the panel. What separates the
+     active terminal is then the *whole* Aurora against its neighbours'
+     two stops, plus the halo and the fact that it has squared up. */
+  --bar-fill: linear-gradient(100deg, var(--hue) 0%, var(--hue-next) 100%);
+  --bar-ink: var(--room-on-hue);
+  --bar-title-shadow: none;
+
+  /* The transcript keeps a frame of the same slice, pulled back to 70%
+     so it reads as an inner edge rather than competing with the 4px
+     one it sits inside. */
+  --screen-edge: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--hue) 70%, transparent) 0%,
+    color-mix(in srgb, var(--hue-next) 70%, transparent) 100%
+  );
+
+  /* …and so does the floor pool, which is where the slice gets the most
+     room of anywhere. The radial falloff moves into the mask because
+     the fill is busy carrying the gradient. */
+  --cast-fill: linear-gradient(100deg, var(--hue) 0%, var(--hue-next) 100%);
+  --cast-mask: radial-gradient(
+    ellipse 42% 100% at 50% 50%,
+    #000 0%,
+    rgb(0 0 0 / 62%) 38%,
+    transparent 100%
+  );
+}
+
+/* Chrome text is the one thing that must not be a slice: the console's
+   own rule is coloured surfaces, neutral type. Light reads it off
+   --text; dark can't (Grey 200 on a tinted panel loses the terminal's
+   identity), so it keeps the hue but lifts it to the 300-level
+   lightness the dark palette uses everywhere else. Neither shows up in
+   the title bar, which is now a solid fill wearing --room-on-hue — this
+   is the SEND label, the elapsed counter and the caret. */
+body[data-theme='pantheon-light'] .panel {
+  --hue-ink: var(--text);
+}
+
+/* Resting panels also light their own slice, rather than every panel
+   sharing one hue-coloured halo: this terminal's colour spills left,
+   the next one's right. It is what makes the run of four read as a
+   single sweep from the far side of the room. */
+body[data-theme='pantheon-dark'] .panel {
+  --hue-ink: color-mix(in srgb, var(--hue) 62%, #fff);
+  --panel-shadow:
+    -14px 0 30px color-mix(in srgb, var(--hue) 38%, transparent),
+    14px 0 30px color-mix(in srgb, var(--hue-next) 34%, transparent),
+    0 0 60px color-mix(in srgb, var(--hue) 16%, transparent), inset 0 0 26px rgb(255 255 255 / 4%);
+}
+
+/* Every light theme wants the same room: pale gradient, quiet grid,
+   paper panels, drop shadows instead of a neon halo. Declaring it once
+   here is also the repair for solarized-light and paper, which until
+   now floated light panels in a black void.
+
+   Matched by the `-light` suffix rather than by name so a new light
+   theme joins by being named one; `paper` predates the convention. */
+body.spatial:is([data-theme$='-light'], [data-theme='paper']) {
+  --room-core: var(--bg-surface);
+  --room-mid: var(--bg);
+  --room-edge: color-mix(in srgb, var(--text) 12%, var(--bg));
+  --room-vignette: color-mix(in srgb, var(--text) 14%, transparent);
+  --room-surface: color-mix(in srgb, var(--bg-surface) 96%, transparent);
+  --room-surface-bar: color-mix(in srgb, var(--bg-elevated) 90%, transparent);
+  --room-on-hue: #fff;
+  --room-tint: 2%;
+  --room-tint-bar: 8%;
+  --cast-opacity: 0.18;
+  --cast-opacity-active: 0.3;
+  --panel-recede: 0.66;
+  --panel-recede-busy: 0.88;
+
+  /* Haze reads *harder* in a bright room — distant things go pale, not
+     dim — but it eats dark text far faster than it eats light text, so
+     the ceiling comes down rather than up. Sheen and flash are white on
+     near-white here, which is nothing; tint them with the room instead. */
+  --fog-max: 0.5;
+  --sheen: color-mix(in srgb, var(--accent) 9%, transparent);
+  --flash: color-mix(in srgb, var(--accent) 55%, #fff);
+}
+
+/* Cloud's horizon is tinted with the brand blue rather than the
+   neutral grey the block above derives from --text. Separate rule
+   because that block would otherwise outrank the palette. */
+body.spatial[data-theme='cloud-light'] {
+  --room-edge: color-mix(in srgb, var(--accent) 14%, var(--bg));
+  --room-vignette: color-mix(in srgb, var(--accent) 12%, transparent);
+
+  /* Four Google colours are only worth having if the room shows them.
+     The shared light values are tuned for hues that are decorative
+     here; these let each terminal put a legible pool of its own colour
+     on the floor and a wash of it in its title bar, which is where
+     most of the Blue/Red/Green actually lands. */
+  --room-tint: 3%;
+  --room-tint-bar: 15%;
+  --cast-opacity: 0.28;
+  --cast-opacity-active: 0.42;
+}
+
+/* A gradient you can't see isn't a gradient. The shared light values
+   are tuned for a flat hue per panel; the slice needs a little more
+   room in the title bar and on the floor before the travel between one
+   terminal's colour and the next reads at all. */
+body.spatial[data-theme='pantheon-light'] {
+  --room-edge: color-mix(in srgb, var(--accent) 12%, var(--bg));
+
+  /* No --room-on-hue here: the shared light block's white is what this
+     theme wants, same as Cloud. See the note in the dark variant. */
+
+  /* Strong, but short of the point where the pools stop being four
+     pools and become one wash that swallows the floor grid. */
+  --cast-opacity: 0.32;
+  --cast-opacity-active: 0.5;
+
+  /* Recede less than the other light themes. Four saturated title bars
+     are the whole idea; dimming the three you aren't typing into to
+     two-thirds throws most of it away. */
+  --panel-recede: 0.82;
+  --panel-recede-busy: 0.94;
+}
+
+/* Material elevation instead of neon: two grey drop shadows plus a
+   hue-tinted hairline, which is all the panel identity a light room
+   needs once the glow is gone. Scoped to .panel because --hue only
+   exists there. */
+body.spatial:is([data-theme$='-light'], [data-theme='paper']) .panel {
+  --panel-shadow:
+    0 1px 2px rgb(60 64 67 / 30%), 0 6px 18px rgb(60 64 67 / 15%),
+    0 0 0 1px color-mix(in srgb, var(--hue) 38%, var(--border));
+  --panel-shadow-active:
+    0 2px 6px rgb(60 64 67 / 30%), 0 12px 34px rgb(60 64 67 / 20%),
+    0 0 24px color-mix(in srgb, var(--hue) 26%, transparent);
+}
+
+/* Pantheon light keeps Material's grey elevation but adds the slice to
+   it: this terminal's colour spills off the left of the card, the next
+   one's off the right. Has to sit after the shared block above — same
+   specificity, so source order is what decides it. */
+body.spatial[data-theme='pantheon-light'] .panel {
+  --panel-shadow:
+    0 1px 2px rgb(60 64 67 / 26%), 0 10px 28px rgb(60 64 67 / 14%),
+    -12px 6px 26px color-mix(in srgb, var(--hue) 32%, transparent),
+    12px 6px 26px color-mix(in srgb, var(--hue-next) 28%, transparent);
+  --panel-shadow-active:
+    0 2px 6px rgb(60 64 67 / 28%), 0 14px 40px rgb(60 64 67 / 18%),
+    -24px 0 44px color-mix(in srgb, var(--aurora-1) 42%, transparent),
+    24px 0 44px color-mix(in srgb, var(--aurora-4) 38%, transparent),
+    0 0 74px color-mix(in srgb, var(--aurora-3) 24%, transparent);
+}
+
+body {
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  overflow: hidden;
+  font-size: 13px;
+
+  /* Derived here rather than in :root so the substitution picks up
+     the theme's --accent (themes override it on body, not :root). */
+  --glow: color-mix(in srgb, var(--accent) var(--glow-amt), transparent);
+  --frame: color-mix(in srgb, var(--accent) var(--frame-amt), transparent);
+
+  /* The floor and ceiling grids, split from --accent so a theme can
+     keep a saturated accent for buttons and links while the room it
+     draws stays quiet — a full-strength brand blue tiled across a
+     4000px floor is a very different amount of colour. Same reason as
+     above for living on body: in :root it would resolve --accent
+     against the default palette and hand every theme a cyan grid. */
+  --grid-line: var(--accent);
+}
+
+/* The blinking block cursor. Defined here rather than in either shell
+   because both of them want it: solo.css:198 and spatial.css:883 blink
+   the prompt caret, spatial.css:1147 the boot-sequence one. Keyframes
+   are global, so one copy in the shared sheet is the whole of it. */
+@keyframes cursor-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+/* ─── Terminal chrome ────────────────────────────────────────────────
+   What's left in this file is the transcript itself — the rows, their
+   headers, tool calls, turn footers, replayed history — plus the
+   modals and the HUD strip's type. The furniture around it belongs to
+   whichever shell is mounting it: solo.css frames one terminal,
+   spatial.css arranges several in a room. #61 deleted the third shell
+   and its chrome with it.
+
+   Everything here is derived from --accent / --frame / --glow so all
+   themes inherit the treatment. Reference: terminal-image.jpeg. */
+
+.hud-brand {
+  color: var(--accent);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-shadow: 0 0 10px var(--glow);
+}
+
+.hud-sep {
+  color: var(--border-soft);
+}
+
+.hud-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* Transcript rows read as a log, not a chat: every row is left-aligned
+   and full-bleed, with a `ROLE: [hh:mm:ss]` header above the body. */
+.message {
+  padding: 4px 0;
+  max-width: 100%;
+  line-height: 1.55;
+  word-wrap: break-word;
+  align-self: stretch;
+}
+
+.msg-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+
+.msg-role {
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.msg-time {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.message.user {
+  color: var(--blue);
+  padding-top: 10px;
+}
+
+.message.user .msg-role {
+  color: var(--accent);
+}
+
+.message.user .msg-body {
+  white-space: pre-wrap;
+}
+
+/* ─── Layouts (/layout slash command) ────────────────────────────────
+   The console restyle makes the log layout the house style, so it's
+   the attribute-less default (the rules above). 'chat' is the opt-in
+   that restores right-aligned tinted user bubbles, tinted with the
+   theme's own --blue via color-mix so it stays correct across all six
+   themes without a hardcoded rgba each. Wiring lives in web/shell.js. */
+body[data-layout='chat'] .message.user {
+  align-self: flex-end;
+  max-width: 80%;
+  background: color-mix(in srgb, var(--blue) 16%, var(--bg-elevated));
+  border-left: 4px solid var(--blue);
+  border-radius: 0 6px 6px 0;
+  padding: 8px 12px;
+  font-weight: 500;
+}
+
+.message.assistant .msg-role {
+  color: var(--green);
+}
+
+.message.assistant .md-content p {
+  margin: 0 0 8px;
+}
+
+.message.assistant .md-content p:last-child {
+  margin-bottom: 0;
+}
+
+.message.assistant .md-content code {
+  background: var(--bg-elevated);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+  color: var(--blue);
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+}
+
+.message.assistant .md-content pre {
+  background: var(--bg-elevated);
+  padding: 12px 14px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 10px 0;
+  border-left: 3px solid var(--gopher-blue);
+}
+
+.message.assistant .md-content pre code,
+.message.assistant .md-content pre code.hljs {
+  background: transparent !important;
+  padding: 0;
+  color: var(--text);
+  font-size: 12px;
+  display: block;
+}
+
+/* Headings */
+.message.assistant .md-content h1,
+.message.assistant .md-content h2,
+.message.assistant .md-content h3,
+.message.assistant .md-content h4 {
+  color: var(--blue);
+  margin: 14px 0 6px;
+  line-height: 1.3;
+}
+
+.message.assistant .md-content h1 {
+  font-size: 18px;
+}
+
+.message.assistant .md-content h2 {
+  font-size: 16px;
+}
+
+.message.assistant .md-content h3 {
+  font-size: 14px;
+}
+
+.message.assistant .md-content h4 {
+  font-size: 13px;
+}
+
+.message.assistant .md-content h1:first-child,
+.message.assistant .md-content h2:first-child,
+.message.assistant .md-content h3:first-child {
+  margin-top: 0;
+}
+
+/* Lists */
+.message.assistant .md-content ul,
+.message.assistant .md-content ol {
+  margin: 6px 0 8px 22px;
+}
+
+.message.assistant .md-content li {
+  margin: 2px 0;
+}
+
+.message.assistant .md-content li > ul,
+.message.assistant .md-content li > ol {
+  margin-top: 2px;
+  margin-bottom: 2px;
+}
+
+/* Inline links */
+.message.assistant .md-content a {
+  color: var(--gopher-blue);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--gopher-blue);
+}
+
+.message.assistant .md-content a:hover {
+  color: var(--blue);
+  border-bottom-color: var(--blue);
+}
+
+/* Blockquote */
+.message.assistant .md-content blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--aqua);
+  color: var(--text-dim);
+  background: rgba(0, 162, 156, 0.05);
+  border-radius: 0 4px 4px 0;
+}
+
+.message.assistant .md-content blockquote p {
+  margin: 4px 0;
+}
+
+/* Tables */
+.message.assistant .md-content table {
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 12px;
+  width: auto;
+  max-width: 100%;
+}
+
+.message.assistant .md-content th,
+.message.assistant .md-content td {
+  padding: 5px 10px;
+  border: 1px solid var(--border-soft);
+  text-align: left;
+}
+
+.message.assistant .md-content th {
+  background: var(--bg-elevated);
+  color: var(--blue);
+  font-weight: 600;
+}
+
+/* Horizontal rule */
+.message.assistant .md-content hr {
+  border: none;
+  border-top: 1px dashed var(--border-soft);
+  margin: 12px 0;
+}
+
+/* Strong + em retain native markdown semantics */
+.message.assistant .md-content strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.message.assistant .md-content em {
+  color: var(--text);
+}
+
+/* System notices are log lines, not centered asides — they interleave
+   with tool rows chronologically and should scan as the same column.
+   pre-wrap because slash-command output is built with padEnd()-aligned
+   columns; without it /help and /stats collapse into a run-on line. */
+.message.system {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: italic;
+  align-self: stretch;
+  padding: 2px 0;
+  white-space: pre-wrap;
+}
+
+.message.system[data-ts]::before {
+  content: '[' attr(data-ts) '] ';
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+
+/* Built-in command output (vs. plain connection/status notices, which
+   keep the muted italic default above) — /mcp, /tools, /subagents,
+   /help, /guardrails, /whoami. Marked via addSystemMessageHTML in
+   web/terminal.js so it reads as structured data rather than a
+   transient notice. Framed like a nested pane so it sits inside the
+   console vocabulary. */
+.message.system.cmd-output {
+  color: var(--text);
+  font-size: 12px;
+  font-style: normal;
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg-elevated));
+  border-left: 2px solid var(--green);
+  border-radius: 0 4px 4px 0;
+  padding: 9px 13px;
+  margin: 3px 0;
+}
+
+.message.system.cmd-output[data-ts]::before {
+  color: var(--text-dim);
+}
+
+/* Structured system-message lists — /mcp, /tools, /subagents. Rendered
+   via SlashRender.renderList() + addSystemMessageHTML rather than a
+   plain-text run-on line, so a bulleted name + tags sits on its own
+   line with the description indented below it (mirrors core-tui's
+   renderToolList / MCP-server renderer). Both shells use these: the
+   renderer was moved out of app.js in PR 2 (#59) so it would outlive
+   it, and in #61 it did. */
+.message.system .list-title {
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+
+/* One dim line under the title: per-source counts for grouped /tools,
+   the "…for descriptions" hint, a usage note. Sits above the first
+   group header, so that header's :first-of-type margin reset still
+   applies — this is a different element, not another header. */
+.message.system .list-summary {
+  margin-bottom: 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.message.system .list-group-header {
+  margin: 10px 0 4px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.message.system .list-group-header:first-of-type {
+  margin-top: 0;
+}
+
+.message.system .list-item {
+  margin: 0 0 8px 12px;
+}
+
+.message.system .list-item-name {
+  color: var(--blue);
+}
+
+.message.system .list-item-tags {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.message.system .list-item-desc {
+  margin: 2px 0 0 16px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* /help: usage beside what it does, as a real two-column grid so a long
+   description wraps inside its own column instead of back under the
+   names. The usage column is capped so one long usage (/share's) cannot
+   squeeze the descriptions to nothing in a narrow panel; past the cap
+   it wraps too. white-space resets the pre-wrap .message.system needs
+   for padEnd()-aligned text, which this is no longer. */
+.message.system .help-table {
+  display: grid;
+  grid-template-columns: fit-content(45%) minmax(0, 1fr);
+  gap: 2px 1.5em;
+  white-space: normal;
+}
+
+.message.system .help-usage {
+  color: var(--blue);
+  font-style: normal;
+  overflow-wrap: anywhere;
+}
+
+.message.system .help-heading,
+.message.system .help-note {
+  margin-top: 0.8em;
+  white-space: normal;
+}
+
+.message.system .help-names {
+  color: var(--blue);
+  font-style: normal;
+}
+
+/* Timestamp gutter shared by tool + builtin-tool rows. */
+.tool-ts {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.message.tool-call {
+  background: var(--bg-surface);
+  border-left: 3px solid var(--yellow);
+  font-size: 12px;
+  align-self: flex-start;
+}
+
+/* Grounded-source strip: one row per turn, appended after the reply.
+   Vertex gives no claim-to-source spans over the attach wire, so there
+   is nothing to anchor an inline superscript to — the strip is the
+   whole citation UI. */
+.citation-sources {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed color-mix(in srgb, var(--aqua) 30%, transparent);
+  font-size: 11px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+}
+
+.citation-sources-label {
+  color: var(--text-dim);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+  margin-right: 2px;
+}
+
+.citation-sources a {
+  color: var(--aqua);
+  text-decoration: none;
+}
+
+.citation-sources a:hover {
+  color: var(--blue);
+  text-decoration: underline;
+}
+
+.message.builtin-tool {
+  align-self: flex-start;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--aqua);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 90%;
+  word-break: break-all;
+}
+
+.message.builtin-tool .builtin-tool-label {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.message.builtin-tool code {
+  background: rgba(0, 162, 156, 0.1);
+  color: var(--aqua);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 500;
+  font-size: 11px;
+  word-break: break-all;
+}
+
+/* Tool messages: pending (yellow pulse) → done (aqua static) → error (fuchsia) */
+.message.tool-pending,
+.message.tool-done {
+  align-self: flex-start;
+  padding: 4px 12px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 90%;
+}
+
+.tool-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tool-row-expandable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.tool-icon {
+  font-style: normal;
+}
+
+.tool-name {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-style: normal;
+  font-weight: 600;
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+}
+
+.tool-latency {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.tool-caret {
+  font-size: 9px;
+  color: var(--text-dim);
+  margin-left: 2px;
+}
+
+/* Pending — pulsing yellow */
+.message.tool-pending {
+  color: var(--brand-yellow);
+  font-style: italic;
+  animation: thinking-pulse 1.4s ease-in-out infinite;
+}
+
+.message.tool-pending .tool-icon {
+  color: var(--brand-yellow);
+}
+
+.message.tool-pending .tool-name {
+  background: rgba(253, 221, 0, 0.1);
+  color: var(--brand-yellow);
+}
+
+/* Done — static aqua */
+.message.tool-done {
+  color: var(--aqua);
+  font-style: normal;
+  animation: none;
+}
+
+.message.tool-done .tool-icon {
+  color: var(--aqua);
+}
+
+.message.tool-done .tool-name {
+  background: rgba(0, 162, 156, 0.1);
+  color: var(--aqua);
+}
+
+/* Error — fuchsia */
+.message.tool-done.tool-error {
+  color: var(--fuchsia);
+}
+
+.message.tool-done.tool-error .tool-icon {
+  color: var(--fuchsia);
+}
+
+.message.tool-done.tool-error .tool-name {
+  background: rgba(206, 50, 98, 0.1);
+  color: var(--fuchsia);
+}
+
+/* Expandable body — JSON viewer */
+.tool-body {
+  display: none;
+  margin-left: 22px;
+  margin-top: 2px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.message.tool-done.open .tool-body {
+  display: block;
+}
+
+.message.tool-result {
+  background: var(--bg-surface);
+  border-left: 3px solid var(--green);
+  font-size: 12px;
+  align-self: flex-start;
+}
+
+/* Turn footer — a labelled hairline rule closing out each turn. */
+.turn-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 6px 0 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Solid, not gradient: a fade-to-transparent on each side reads as
+   two rules of different lengths rather than one centered label. */
+.turn-footer::before,
+.turn-footer::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border-soft);
+  opacity: 0.55;
+}
+
+/* ─── Replayed history ───────────────────────────────────────────────
+   What the session said before this view attached. It sits above the
+   live stream, dimmed, because it is context rather than conversation:
+   the eye should land on what is happening now and read upward from
+   there. Only the newest few turns are drawn — the control at the top
+   asks for more, and so does scrolling to it. */
+.replay-history {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-self: stretch;
+}
+
+/* Dim the history itself, not the rule that closes it: opacity on the
+   block would take the boundary marker down with it, and that marker
+   is the one part of this that speaks for the live stream. */
+.replay-history > .history-more,
+.replay-history > .history-body {
+  opacity: 0.62;
+  transition: opacity 140ms ease;
+}
+
+/* Reading it is a deliberate act, so it comes up to full strength
+   under the pointer rather than staying permanently half-lit. */
+.replay-history:hover > .history-more,
+.replay-history:hover > .history-body,
+.replay-history:focus-within > .history-more,
+.replay-history:focus-within > .history-body {
+  opacity: 1;
+}
+
+.history-body,
+.history-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.history-more {
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 6px 0 10px;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: center;
+}
+
+.history-more:hover:not(:disabled),
+.history-more:focus-visible:not(:disabled) {
+  color: var(--accent);
+}
+
+/* Disabled is not a dead button here — it is the end-of-log marker,
+   wearing the same row so the transcript doesn't shift when the last
+   turn is handed over. */
+.history-more:disabled {
+  cursor: default;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+
+/* Built like .turn-footer: solid hairlines either side of a label,
+   because a fade-to-transparent reads as two rules of unequal length
+   rather than one centered caption. */
+.history-rule {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 4px 0 12px;
+}
+
+.history-rule::before,
+.history-rule::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border-soft);
+  opacity: 0.55;
+}
+
+/* Per-message action chips — the bracketed [COPY] [RETRY] row. Hidden
+   until the row is hovered or focused so a long transcript stays
+   quiet; :focus-within keeps them reachable by keyboard. */
+.msg-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 2px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.message:hover .msg-actions,
+.message:focus-within .msg-actions {
+  opacity: 1;
+}
+
+.msg-action {
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.msg-action::before {
+  content: '[';
+}
+
+.msg-action::after {
+  content: ']';
+}
+
+.msg-action:hover {
+  color: var(--accent);
+  text-shadow: 0 0 10px var(--glow);
+}
+
+.msg-action.done {
+  color: var(--green);
+}
+
+.thinking {
+  align-self: flex-start;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--blue);
+  letter-spacing: 0.02em;
+  animation: thinking-pulse 1.4s ease-in-out infinite;
+}
+
+.thinking::before {
+  content: '◆ ';
+  color: var(--brand-yellow);
+  font-style: normal;
+}
+
+@keyframes thinking-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+.json-viewer {
+  background: var(--bg-elevated);
+  padding: 8px;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  font-size: 11px;
+  overflow-x: auto;
+}
+
+/* Modal */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 100;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-overlay.open {
+  display: flex;
+}
+
+.modal {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 24px;
+  width: 400px;
+  max-width: 90%;
+}
+
+.modal h2 {
+  color: var(--accent);
+  margin-bottom: 16px;
+  font-size: 16px;
+}
+
+.modal label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+  margin-top: 12px;
+}
+
+.modal input,
+.modal select {
+  width: 100%;
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.modal .btn-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 20px;
+  justify-content: flex-end;
+}
+
+.modal button {
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+}
+
+.modal .btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+}
+
+/* Command palette + session picker — wider modal, no vertical
+   padding on the inner list (rows own their own padding). */
+.modal.palette {
+  width: 520px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.modal.palette input {
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  padding: 12px 16px;
+  font-size: 13px;
+  background: var(--bg-elevated);
+}
+
+.modal.palette input:focus {
+  outline: none;
+  border-bottom-color: var(--accent);
+}
+
+#palette-list,
+#picker-list {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.palette-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.palette-item:hover {
+  background: var(--bg-elevated);
+}
+
+.palette-item .palette-cmd {
+  color: var(--text);
+}
+
+.palette-item .palette-src {
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+/* <kbd> styling for the shortcuts overlay — makes the key label
+   look like a physical key. */
+kbd {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--brand-yellow);
+}
+
+/* Scrollbars stay subtle everywhere. The accent-lit transcript bar
+   that used to override this belonged to #output-area, which was
+   index.html's single scroll region; a shell with one terminal per
+   pane has no such singular thing to light up, and solo.css /
+   spatial.css style their own .term-out if they want to. */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-dim);
+}
+
+/* ─── Slash-response renderers (v0.3.0 PR 4) ─────────────────────
+ * Styles for the table + tree renderers registered in slash-render.js.
+ * text / markdown / json use <pre> blocks and inherit .message system
+ * styling above. */
+
+.slash-render-table table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+  margin: 4px 0;
+}
+
+.slash-render-table th,
+.slash-render-table td {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.slash-render-table th {
+  background: var(--bg-elevated);
+  cursor: pointer;
+  user-select: none;
+  font-weight: 600;
+}
+
+.slash-render-table th:hover {
+  background: var(--border);
+}
+
+.slash-render-table tbody tr:nth-child(odd) {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.slash-render-tree {
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  padding: 4px 0;
+}
+
+.slash-render-tree details {
+  margin-left: 12px;
+}
+
+.slash-render-tree summary {
+  cursor: pointer;
+  padding: 2px 0;
+  list-style-position: outside;
+}
+
+.slash-render-tree summary:hover {
+  color: var(--accent, #4a9eff);
+}
+
+.slash-tree-key {
+  color: var(--blue, #4a9eff);
+  font-weight: 600;
+}
+
+.slash-tree-count {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.slash-tree-value {
+  color: var(--text);
+}
+
+.slash-tree-truncated,
+.slash-tree-truncated-hint {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.slash-tree-leaf {
+  margin-left: 16px;
+  padding: 1px 0;
+}

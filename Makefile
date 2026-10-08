@@ -15,13 +15,13 @@
 IMAGE ?= us-central1-docker.pkg.dev/gke-demos-345619/ax/substrate-scope
 CONTEXT ?= agent-substrate
 
-.PHONY: build test lint fmt fmt-check vet ci image push deploy run-local screens generate
+.PHONY: build test lint fmt fmt-check vet ci image push deploy run-local screens generate vendor-mast-web
 
 build:
 	go build -o bin/substrate-scope ./cmd/substrate-scope
 
 test:
-	go test ./...
+	go test -race ./...
 	node --test web/js/*.test.js
 
 vet:
@@ -42,6 +42,11 @@ lint:
 	npx eslint web hack
 
 ci: fmt-check vet test lint
+
+# Refresh the vendored mast-web (web/vendor/mast-web) at MAST_WEB_REF (default:
+# the commit recorded in web/vendor/mast-web/VERSION).
+vendor-mast-web:
+	hack/vendor-mast-web.sh $(MAST_WEB_REF)
 
 # Regenerate the ax API stubs (needs buf, protoc-gen-go, protoc-gen-go-grpc, goimports).
 generate:
