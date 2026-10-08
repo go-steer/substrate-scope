@@ -59,7 +59,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: substrate-scope
-          image: us-central1-docker.pkg.dev/gke-demos-345619/ax/substrate-scope@sha256:b70b4d935e574ca9832fbb77f7470c7e91b637f7ada07739bdb01f6baa05e72a
+          image: us-central1-docker.pkg.dev/gke-demos-345619/ax/substrate-scope@sha256:9da5f807f672b1d1e3b3f929454b38510fbf8dfc91e66f9404dac891e711bf31
           args:
             - "--addr=:8080"
             - "--cluster=agent-substrate"
@@ -70,6 +70,9 @@ spec:
             - "--ax-endpoint=ax-server.ax-system.svc.cluster.local:8080"
             - "--router=atenet-router.ate-system.svc.cluster.local:80"
             - "--attach-token-file=/run/attach/token"
+            # The UI is reached through Cloud Workstations' port proxy, which
+            # rewrites Host, so the browser's Origin must be allowed explicitly.
+            - "--allowed-origins=*.cloudworkstations.dev"
           ports:
             - containerPort: 8080
               name: http

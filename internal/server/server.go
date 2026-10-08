@@ -68,6 +68,13 @@ type Options struct {
 	RunnerCacheTTL time.Duration
 	// PingInterval keeps WebSockets alive, default 20s.
 	PingInterval time.Duration
+
+	// AllowedOrigins are extra host patterns (path.Match syntax, e.g.
+	// "*.cloudworkstations.dev") whose pages may open the event stream.
+	// Same-origin pages are always allowed. Needed when the UI is reached
+	// through a proxy that rewrites the Host header, so the browser's Origin
+	// no longer matches it.
+	AllowedOrigins []string
 }
 
 // Server is the HTTP handler.
@@ -129,7 +136,7 @@ type StreamMessage struct {
 }
 
 func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
-	c, err := websocket.Accept(w, r, nil)
+	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: s.o.AllowedOrigins})
 	if err != nil {
 		return
 	}

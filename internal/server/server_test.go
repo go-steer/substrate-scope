@@ -303,3 +303,36 @@ func TestStreamResyncsLaggingClient(t *testing.T) {
 		}
 	}
 }
+
+// Behind a proxy that rewrites Host (Cloud Workstations, IAP), the browser's
+// Origin no longer matches, so the stream must accept the configured patterns
+// and still refuse everything else.
+func TestStreamAllowedOrigins(t *testing.T) {
+	store := collector.NewStore(collector.Options{Cluster: "test", Source: "test"})
+	srv := httptest.NewServer(New(Options{Store: store, AllowedOrigins: []string{"*.cloudworkstations.dev"}}))
+	t.Cleanup(srv.Close)
+	url := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/stream"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for origin, wantOK := range map[string]bool{
+		"https://8080-basic-default2.cluster-abc.cloudworkstations.dev": true,
+		"https://evil.example.com":                                      false,
+	} {
+		c, resp, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": {origin}}})
+		if wantOK {
+			if err != nil {
+				t.Errorf("origin %s refused: %v", origin, err)
+				continue
+			}
+			c.CloseNow()
+			continue
+		}
+		if err == nil {
+			c.CloseNow()
+			t.Errorf("origin %s accepted, want refused", origin)
+		} else if resp == nil || resp.StatusCode != http.StatusForbidden {
+			t.Errorf("origin %s: err %v, want 403", origin, err)
+		}
+	}
+}

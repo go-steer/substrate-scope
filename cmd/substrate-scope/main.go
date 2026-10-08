@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -59,6 +60,7 @@ func run() error {
 		addr        = flag.String("addr", envOr("SCOPE_ADDR", ":8080"), "listen address")
 		clusterName = flag.String("cluster", envOr("SCOPE_CLUSTER", "cluster"), "cluster name shown on the island")
 		source      = flag.String("source", "cluster", "data source: cluster (Substrate + ax); sim arrives in milestone 2")
+		origins     = flag.String("allowed-origins", envOr("SCOPE_ALLOWED_ORIGINS", ""), "comma-separated extra host patterns allowed to open the event stream, e.g. *.cloudworkstations.dev (for proxies that rewrite Host)")
 		webDir      = flag.String("web-dir", "", "serve the front end from this directory instead of the embedded copy (development)")
 
 		subEndpoint  = flag.String("substrate-endpoint", "api.ate-system.svc.cluster.local:443", "Substrate control API host:port")
@@ -113,7 +115,7 @@ func run() error {
 	}
 	var src collector.Source = cluster.New(copts)
 
-	sopts := server.Options{Actors: sub}
+	sopts := server.Options{Actors: sub, AllowedOrigins: splitList(*origins)}
 	features := model.Features{}
 	if *routerAddr != "" {
 		rc := &router.Client{Addr: *routerAddr}
@@ -176,4 +178,15 @@ func existing(path string) string {
 		return ""
 	}
 	return path
+}
+
+// splitList splits a comma-separated flag value, dropping empty entries.
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
