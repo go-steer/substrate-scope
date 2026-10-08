@@ -122,7 +122,7 @@ export class Effects {
   /** Wake: a comet along an arc from the router tower to the agent. */
   arc(from, to, color, onArrive) {
     const mid = from.clone().lerp(to, 0.5);
-    mid.y += 4 + from.distanceTo(to) * 0.35;
+    mid.y += 2.5 + from.distanceTo(to) * 0.2;
     const curve = new THREE.QuadraticBezierCurve3(from.clone(), mid, to.clone());
     const geo = new THREE.TubeGeometry(curve, 128, 0.13, 8, false);
     const mat = new THREE.ShaderMaterial({

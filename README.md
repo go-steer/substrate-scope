@@ -17,6 +17,10 @@ Rendered with three.js and GPU instancing so a cluster with thousands of agents 
 - Click an agent for the **side panel**: Substrate state, worker, template, snapshot; ax phase, conditions and reasons (`IdleSuspended`, `ResumedByRequest`, ...), the idle policy and, for running ax tasks, the live idle time. With the attach proxy configured you can list the agent's sessions and tail a session's events.
 - **Filters** (atespace, state chips, name prefix) dim everything that doesn't match. `/` focuses the search, Enter flies to the first match, `h` shows the whole island, Esc closes the panel.
 
+| A request wakes a suspended agent | The side panel: ax reasons and live idle time | A mast triage session, tailed through the attach proxy |
+|---|---|---|
+| ![Wake arc](docs/images/wake.png) | ![Side panel](docs/images/selected-agent.png) | ![Session tail](docs/images/session-tail.png) |
+
 ## Quickstart (in a cluster)
 
 The collector runs as its own service account in namespace `substrate-scope`. It authenticates to Substrate's control API with a projected token for audience `api.ate-system.svc` and trusts the servicedns CA bundle, the same way ax-server does.

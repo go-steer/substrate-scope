@@ -628,7 +628,7 @@ export class Scene {
       switch (ev.type) {
         case 'agent_woke': {
           const top = new THREE.Vector3(rec.x, rec.h + 0.2, rec.z);
-          this.effects.arc(this.towerTop, top, ev.reason === 'ResumedByRequest' ? 0x7fe8ff : 0xffd36b, () => {
+          this.effects.arc(this.towerTop, top, 0x7fe8ff, () => {
             this.flash(rec.key);
             this.effects.ripple(rec.x, rec.z, 0x2ee6c5, 1.4);
           });
