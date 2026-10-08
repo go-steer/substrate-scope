@@ -125,7 +125,7 @@ void main() {
   vec3 glow = vColor * uEmissive * (0.25 + 0.9 * top) * breath;
   glow += vColor * (pulse * 1.6 + vFlash * 1.6);
   float rim = smoothstep(0.07, 0.0, edge);
-  glow += vColor * rim * (0.35 + uEmissive * 0.9);
+  glow += vColor * rim * (0.12 + uEmissive * 0.8);
   vec3 col = base + glow;
   col = mix(col, col * 0.08 + vec3(0.012, 0.016, 0.03), vDim);
   gl_FragColor = vec4(col, 1.0);
@@ -311,6 +311,9 @@ export class Scene {
     this.plan = null;
     this.workers = new Map();
     this.model = null;
+    // ?slowmo=N plays animations N times slower (for recording demos and
+    // for screenshots with a software renderer).
+    this.slowmo = Math.max(1, Number(new URLSearchParams(window.location.search).get('slowmo')) || 1);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -374,7 +377,7 @@ export class Scene {
     // Post-processing: bloom on the emissive parts.
     const composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.6, 0.5, 0.72);
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.5, 0.45, 0.8);
     composer.addPass(this.bloom);
     composer.addPass(new OutputPass());
     this.composer = composer;
@@ -854,6 +857,10 @@ export class Scene {
     const spacing = 4.2;
     const perRow = Math.max(1, Math.floor((this.plan.width + 4) / spacing));
     const want = new Set(list.map((w) => w.name));
+    const hosted = new Map();
+    for (const rec of this.recs.values()) {
+      if (rec.agent.worker) hosted.set(rec.agent.worker, (hosted.get(rec.agent.worker) || 0) + 1);
+    }
     for (const [name, w] of this.workers) {
       if (!want.has(name)) {
         this.world.remove(w.group);
@@ -899,9 +906,10 @@ export class Scene {
       const x = this.island.cx - ((inRow - 1) * spacing) / 2 + col * spacing;
       const z = this.workerRowZ + row * 3;
       w.group.position.set(x, 0, z);
-      const running = [...this.recs.values()].filter((r) => r.agent.worker === wk.name).length;
+      const running = hosted.get(wk.name) || 0;
       w.glow.material.opacity = running ? 0.06 + Math.min(running, 8) * 0.02 : 0.0;
       w.glow.material.color.set(wk.state === 'DRAINING' ? 0xffb547 : 0x2ee6c5);
+      w.label.visible = list.length <= 16;
       w.label.element.innerHTML = `<div class="name">${esc(workerLabel(wk))}</div><div class="meta">${running} actor${running === 1 ? '' : 's'}${wk.state && wk.state !== 'ACTIVE' ? ' · ' + esc(wk.state.toLowerCase()) : ''}</div>`;
       w.pos = new THREE.Vector3(x, 0.32, z);
     });
@@ -917,6 +925,9 @@ export class Scene {
     }
     const g = this.workerLines.geometry;
     g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+    // Many lines add up; keep the bundle faint as it grows.
+    const n = pts.length / 6;
+    this.workerLines.material.opacity = Math.min(0.24, Math.max(0.035, 0.24 * Math.sqrt(12 / Math.max(n, 1))));
     g.computeBoundingSphere();
   }
 
@@ -935,7 +946,7 @@ export class Scene {
     const rec = this.recs.get(key);
     if (!rec) return;
     const dir = this.camera.position.clone().sub(this.controls.target).normalize();
-    const dist = Math.max(Math.min(this.camera.position.distanceTo(this.controls.target), 30), 18);
+    const dist = Math.max(Math.min(this.camera.position.distanceTo(this.controls.target), 34), 24);
     // With the side panel open, aim right of the agent so it sits left of
     // center, clear of the panel.
     const right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize().multiplyScalar(-dist * 0.18);
@@ -1015,7 +1026,7 @@ export class Scene {
 
   frame() {
     this.timer.update();
-    const dt = Math.min(this.timer.getDelta(), 1.0);
+    const dt = Math.min(this.timer.getDelta(), 1.0) / this.slowmo;
     this.time.value += dt;
     const t = this.time.value;
 

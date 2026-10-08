@@ -32,7 +32,8 @@ export function describe(events) {
   const out = [];
   const semantic = new Set(events.filter((e) => ['agent_woke', 'agent_suspended', 'agent_crashed', 'agent_added'].includes(e.type)).map((e) => e.key));
   for (const e of events) {
-    const name = esc(e.key);
+    const [as, ...rest] = (e.key || '').split('/');
+    const name = rest.length ? `<span class="as">${esc(as)}/</span>${esc(rest.join('/'))}` : esc(e.key);
     switch (e.type) {
       case 'agent_added':
         out.push({ type: 'added', key: e.key, state: e.agent.state, text: `${e.agent.task ? 'new ax task' : 'new agent'} <b>${name}</b>` });

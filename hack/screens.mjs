@@ -53,7 +53,18 @@ await page.waitForFunction(() => window.scope && window.scope.model.seq > 0, nul
 if (args.eval) await page.evaluate(args.eval);
 await page.waitForTimeout(Number(args.wait || 4000));
 
-if (args.watch) {
+if (args.event) {
+  // Wait for an event type (e.g. agent_woke), then take a burst of frames
+  // so the animation it starts is caught.
+  const before = await page.evaluate((t) => window.scope.eventCounts[t] || 0, args.event);
+  await page.waitForFunction((a) => (window.scope.eventCounts[a.t] || 0) > a.n, { t: args.event, n: before }, { timeout: Number(args.timeout || 900) * 1000, polling: 100 });
+  const burst = Number(args.burst || 8);
+  for (let i = 0; i < burst; i++) {
+    const file = path.join(out, `${name}-${String(i).padStart(2, "0")}.png`);
+    await page.screenshot({ path: file });
+    console.log(file);
+  }
+} else if (args.watch) {
   const until = Date.now() + Number(args.watch) * 1000;
   let i = 0;
   let lastSeq = -1;

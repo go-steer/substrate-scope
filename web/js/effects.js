@@ -29,8 +29,8 @@ uniform float uProg; uniform vec3 uColor; uniform float uFade;
 varying vec2 vUv;
 void main(){
   float u = vUv.x;
-  float head = smoothstep(uProg - 0.22, uProg, u) * (1.0 - smoothstep(uProg, uProg + 0.015, u));
-  float trail = step(u, uProg) * 0.18;
+  float head = smoothstep(uProg - 0.35, uProg, u) * (1.0 - smoothstep(uProg, uProg + 0.015, u));
+  float trail = step(u, uProg) * 0.3;
   float a = (head * 1.0 + trail) * uFade;
   if (a < 0.01) discard;
   gl_FragColor = vec4(uColor * (0.5 + 1.6 * head), a);
@@ -108,16 +108,15 @@ export class Effects {
     });
     const m = new THREE.Mesh(beamGeo, mat);
     m.position.set(x, 0.1, z);
+    m.scale.set(0.8, 26, 0.8);
     this.add(m, (age) => {
-      const k = age / 2.4;
+      const k = age / 3.5;
       if (k >= 1) return false;
-      const drop = Math.min(k * 3, 1);
-      m.scale.set(0.8, 30 * drop, 0.8);
-      m.position.y = 0.1 + 30 * (1 - drop);
-      mat.uniforms.uAlpha.value = (k < 0.3 ? k / 0.3 : 1 - (k - 0.3) / 0.7) * 0.45;
+      // Up fast, hold, fade.
+      mat.uniforms.uAlpha.value = (k < 0.08 ? k / 0.08 : k < 0.4 ? 1 : 1 - (k - 0.4) / 0.6) * 0.5;
       return true;
     });
-    this.ripple(x, z, color, 1.2, 0.6);
+    this.ripple(x, z, color, 1.2, 0.2);
   }
 
   /** Wake: a comet along an arc from the router tower to the agent. */
@@ -125,7 +124,7 @@ export class Effects {
     const mid = from.clone().lerp(to, 0.5);
     mid.y += 4 + from.distanceTo(to) * 0.35;
     const curve = new THREE.QuadraticBezierCurve3(from.clone(), mid, to.clone());
-    const geo = new THREE.TubeGeometry(curve, 96, 0.09, 8, false);
+    const geo = new THREE.TubeGeometry(curve, 128, 0.13, 8, false);
     const mat = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
@@ -136,7 +135,7 @@ export class Effects {
     });
     const m = new THREE.Mesh(geo, mat);
     let arrived = false;
-    const travel = 1.3;
+    const travel = 1.8;
     this.add(m, (age) => {
       const k = age / travel;
       mat.uniforms.uProg.value = Math.min(k, 1.0) * 1.02;
@@ -144,8 +143,8 @@ export class Effects {
         arrived = true;
         onArrive?.();
       }
-      if (k > 1) mat.uniforms.uFade.value = Math.max(0, 1 - (k - 1) * 1.5);
-      if (k > 1.7) {
+      if (k > 1) mat.uniforms.uFade.value = Math.max(0, 1 - (k - 1) * 1.2);
+      if (k > 1.9) {
         geo.dispose();
         return false;
       }

@@ -27,6 +27,8 @@ const $ = (sel) => document.querySelector(sel);
 const model = new Model();
 const filterState = { atespace: '', classes: new Set(CLASSES), prefix: '' };
 let selected = null;
+/** Events seen per type (for tests and screenshot tooling). */
+const eventCounts = {};
 
 const scene = new Scene($('#viewport'), {
   onPick: (key) => select(key, false),
@@ -49,6 +51,10 @@ new Stream(streamURL(), {
     model.applySnapshot(snap);
     scene.setModel(model);
     if (resync) feed({ type: 'meta', text: 'resynced from a fresh snapshot' });
+    else {
+      const c = model.counts();
+      feed({ type: 'meta', text: `connected to <b>${esc(model.cluster)}</b>: ${model.agents.size} agents, ${c.running} running, ${c.suspended} suspended` });
+    }
     refreshChrome();
     if (selected && !model.agents.has(selected)) select(null);
     else if (selected) panel.show(selected);
@@ -57,6 +63,7 @@ new Stream(streamURL(), {
   },
   onEvents: (events) => {
     if (!model.applyEvents(events)) return false;
+    for (const e of events) eventCounts[e.type] = (eventCounts[e.type] || 0) + 1;
     scene.applyEvents(events);
     describe(events).forEach(feed);
     refreshChrome();
@@ -207,4 +214,4 @@ setInterval(() => {
 }, 1000);
 
 // For debugging and screenshots.
-window.scope = { model, scene, select, stateClass };
+window.scope = { model, scene, select, stateClass, eventCounts };
