@@ -293,6 +293,11 @@ function textPlane(text, { size = 3, color = '#7f93bd', weight = 700, letterSpac
   return mesh;
 }
 
+// Seconds a label stays up after its agent changes state (crashes: twice).
+const CHANGE_LABEL_SECONDS = 6;
+// Camera-to-target distance under which 'auto' labels every nearby agent.
+const CLOSE_UP_DISTANCE = 20;
+
 export class Scene {
   /**
    * @param {HTMLElement} container
@@ -308,6 +313,8 @@ export class Scene {
     this.selected = null;
     this.anims = new Map();
     this.labelPinned = new Map(); // key -> until (seconds)
+    // Agent labels: 'auto' (selected, recent changes, close-ups), 'all', 'off'.
+    this.labelMode = 'auto';
     this.plan = null;
     this.workers = new Map();
     this.model = null;
@@ -618,7 +625,7 @@ export class Scene {
         rec = this.recs.get(key);
         this.animateHeight(rec, CLASS_HEIGHT[rec.cls], 1.2);
         if (ev.agent.task) this.effects.beam(rec.x, rec.z, stateColor(ev.agent.state));
-        this.pinLabel(key, 8);
+        this.pinLabel(key, CHANGE_LABEL_SECONDS);
         workersChanged = true;
         continue;
       }
@@ -633,17 +640,17 @@ export class Scene {
             this.effects.ripple(rec.x, rec.z, 0x2ee6c5, 1.4);
           });
           this.towerPulse = now;
-          this.pinLabel(key, 10);
+          this.pinLabel(key, CHANGE_LABEL_SECONDS);
           break;
         }
         case 'agent_suspended':
           this.effects.ripple(rec.x, rec.z, 0x6f8fd8, 1.6);
           this.effects.ripple(rec.x, rec.z, 0x6f8fd8, 1.6, 0.35);
-          this.pinLabel(key, 8);
+          this.pinLabel(key, CHANGE_LABEL_SECONDS);
           break;
         case 'agent_crashed':
           this.effects.shock(rec.x, rec.z, 0xff3b5c);
-          this.pinLabel(key, 15);
+          this.pinLabel(key, CHANGE_LABEL_SECONDS * 2);
           break;
         case 'task_updated':
           if (ev.new) this.effects.beam(rec.x, rec.z, 0x7fe8ff);
@@ -693,8 +700,15 @@ export class Scene {
     layer.markDirty();
   }
 
+  /** Shows an agent's label for a while (it just changed state). */
   pinLabel(key, seconds) {
     this.labelPinned.set(key, this.time.value + seconds);
+  }
+
+  /** 'auto', 'all' or 'off'. */
+  setLabelMode(mode) {
+    this.labelMode = mode;
+    this.lastLabelUpdate = -1;
   }
 
   /** Sets the filter predicate and dims everything that doesn't match. */
@@ -823,6 +837,44 @@ export class Scene {
     g.add(tower);
     this.towerTop = new THREE.Vector3(tx, 7.4, tz);
     this.beacon = beacon;
+  }
+
+  /**
+   * Keeps district labels readable: a label wider than its district on
+   * screen drops its state chips (and, when tiny, its count), and a label
+   * that would overlap a bigger district's label is hidden.
+   */
+  layoutDistrictLabels() {
+    if (!this.plan) return;
+    const W = this.renderer.domElement.clientWidth;
+    const H = this.renderer.domElement.clientHeight;
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const ds = [...this.plan.districts.values()].filter((d) => d.label).sort((x, y) => y.w * y.d - x.w * x.d);
+    // The selected agent's label wins over district labels.
+    const placed = [];
+    const sel = this.agentLabels.find((o) => o.visible && o.element.classList.contains('selected'));
+    if (sel) {
+      const r = sel.element.getBoundingClientRect();
+      if (r.width) placed.push({ x0: r.left, x1: r.right, y0: r.top, y1: r.bottom });
+    }
+    for (const d of ds) {
+      a.set(d.x, 0, d.z + d.d / 2).project(this.camera);
+      b.set(d.x + d.w, 0, d.z + d.d / 2).project(this.camera);
+      const px = (Math.abs(b.x - a.x) / 2) * W;
+      // Fit the label inside its district's width: full, then without
+      // chips, then name only.
+      const cl = d.label.classList;
+      cl.remove('compact', 'tiny');
+      if (d.label.offsetWidth > px) cl.add('compact');
+      if (d.label.offsetWidth > px) cl.add('tiny');
+      const r = d.label.getBoundingClientRect();
+      const box = { x0: r.left - 4, x1: r.right + 4, y0: r.top - 2, y1: r.bottom + 2 };
+      const off = r.right < 0 || r.left > W || r.bottom < 0 || r.top > H;
+      const hit = placed.some((q) => box.x0 < q.x1 && box.x1 > q.x0 && box.y0 < q.y1 && box.y1 > q.y0);
+      d.label.classList.toggle('crowded', hit);
+      if (!hit && !off) placed.push(box);
+    }
   }
 
   updateDistrictLabels() {
@@ -957,7 +1009,7 @@ export class Scene {
 
   select(key) {
     this.selected = key;
-    if (key) this.pinLabel(key, 1e9);
+    this.lastLabelUpdate = -1;
     this.updateMarker();
   }
 
@@ -1083,36 +1135,60 @@ export class Scene {
     if (t - this.lastLabelUpdate > 0.25) {
       this.lastLabelUpdate = t;
       this.updateAgentLabels();
+      this.layoutDistrictLabels();
     }
 
     this.composer.render();
     this.labelRenderer.render(this.scene, this.camera);
   }
 
-  /** Shows labels for the agents nearest the camera, plus pinned ones. */
+  /**
+   * Picks which agents get a label. In 'auto' mode: the selected agent,
+   * agents that just changed state (for a few seconds), and the agents near
+   * the camera only when it is close in on a district. 'all' labels every
+   * agent near the camera; 'off' none. Hovering shows a tooltip instead.
+   */
   updateAgentLabels() {
     const cam = this.camera.position;
     const t = this.time.value;
+    const mode = this.labelMode;
     const frustum = new THREE.Frustum().setFromProjectionMatrix(
       new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse),
     );
     const near = [];
     const p = new THREE.Vector3();
-    const maxDist = 34;
-    for (const rec of this.recs.values()) {
-      p.set(rec.x, rec.h, rec.z);
-      const pinned = (this.labelPinned.get(rec.key) || 0) > t;
-      const d = cam.distanceTo(p);
-      if (!pinned && (d > maxDist || !this.filter(rec.agent))) continue;
-      if (!frustum.containsPoint(p)) continue;
-      near.push({ rec, d: pinned ? -1 : d });
+    const closeUp = cam.distanceTo(this.controls.target) < CLOSE_UP_DISTANCE;
+    const maxDist = mode === 'all' ? 60 : closeUp ? 34 : 0;
+    if (mode !== 'off') {
+      for (const rec of this.recs.values()) {
+        p.set(rec.x, rec.h, rec.z);
+        const selected = rec.key === this.selected;
+        const until = this.labelPinned.get(rec.key) || 0;
+        const pinned = until > t;
+        const d = cam.distanceTo(p);
+        let prio;
+        if (selected) prio = -1e9;
+        else if (pinned && this.filter(rec.agent)) prio = -until; // newest change first
+        else if (d <= maxDist && this.filter(rec.agent)) prio = d;
+        else continue;
+        if (!frustum.containsPoint(p)) continue;
+        near.push({ rec, d: prio, fade: pinned && !selected && until - t < 1.5 });
+      }
     }
     near.sort((a, b) => a.d - b.d);
     // Greedy screen-space placement: skip a label that would overlap one
     // already placed, so a dense district doesn't turn into a smear.
     const W = this.renderer.domElement.clientWidth;
     const H = this.renderer.domElement.clientHeight;
+    // District labels are obstacles: a passing agent label never covers one.
     const placed = [];
+    if (this.plan) {
+      for (const d of this.plan.districts.values()) {
+        if (!d.label || d.label.classList.contains('crowded')) continue;
+        const r = d.label.getBoundingClientRect();
+        if (r.width) placed.push({ x0: r.left, x1: r.right, y0: r.top, y1: r.bottom });
+      }
+    }
     const chosen = [];
     for (const item of near) {
       if (chosen.length >= this.agentLabels.length) break;
@@ -1123,7 +1199,7 @@ export class Scene {
       const w = 40 + rec.agent.name.length * 7 + (rec.agent.state.length + 8) * 5.6;
       const box = { x0: x - w * 0.1, x1: x + w * 0.9, y0: y - 22, y1: y };
       const hit = placed.some((b) => box.x0 < b.x1 && box.x1 > b.x0 && box.y0 < b.y1 && box.y1 > b.y0);
-      if (hit && item.d >= 0) continue;
+      if (hit && item.d > -1e9) continue;
       placed.push(box);
       chosen.push(item);
     }
@@ -1143,6 +1219,7 @@ export class Scene {
       const html = `<span class="dot" style="background:${cssColor(a.state)}"></span>${esc(a.name)}<span class="sub">${esc(a.state.toLowerCase())} ${age}</span>`;
       if (obj.element.innerHTML !== html) obj.element.innerHTML = html;
       obj.element.classList.toggle('selected', rec.key === this.selected);
+      obj.element.classList.toggle('fading', !!item.fade);
     }
     for (const [k, until] of this.labelPinned) if (until < t) this.labelPinned.delete(k);
   }

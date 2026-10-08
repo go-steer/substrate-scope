@@ -173,4 +173,7 @@ type Features struct {
 	// RunnerStatus is true when the collector can read ax runner status
 	// through the router.
 	RunnerStatus bool `json:"runnerStatus"`
+	// MastWeb is true when the collector serves mast-web for agents (needs
+	// the attach proxy).
+	MastWeb bool `json:"mastWeb"`
 }

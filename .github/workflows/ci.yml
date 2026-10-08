@@ -17,8 +17,8 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every PR, including ones stacked on a feature branch.
   pull_request:
-    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
