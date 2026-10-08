@@ -1,0 +1,70 @@
+<!doctype html>
+<!--
+ Copyright 2026 Google LLC
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>substrate-scope</title>
+    <link rel="stylesheet" href="style.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "./vendor/three/three.module.js",
+          "three/addons/": "./vendor/three/addons/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="viewport"></div>
+
+    <header id="topbar">
+      <div class="brand">
+        <span class="logo"></span>
+        <span class="title">substrate<span class="thin">scope</span></span>
+        <span class="sep"></span>
+        <span id="cluster" class="cluster"></span>
+        <span id="conn" class="conn connecting"><span class="led"></span><span class="txt">connecting</span></span>
+      </div>
+      <div id="legend" class="legend"></div>
+      <div class="filters">
+        <select id="atespace" aria-label="Atespace"><option value="">All atespaces</option></select>
+        <input id="prefix" type="search" placeholder="Name prefix  /" spellcheck="false" autocomplete="off" aria-label="Name prefix" />
+        <button id="home" class="icon" title="Show the whole cluster (h)">⌂</button>
+      </div>
+    </header>
+
+    <aside id="panel" class="panel" aria-live="polite"></aside>
+
+    <section id="feedwrap">
+      <div class="feed-title">Live events</div>
+      <div id="feed"></div>
+    </section>
+
+    <footer id="statusbar">
+      <span id="total"></span>
+      <span id="health"></span>
+      <span class="spacer"></span>
+      <span id="seq"></span>
+      <span id="clock"></span>
+    </footer>
+
+    <div id="tooltip"></div>
+
+    <script type="module" src="js/main.js"></script>
+  </body>
+</html>

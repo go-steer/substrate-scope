@@ -1,0 +1,22 @@
+# Build output.
+/bin/
+/substrate-scope
+
+# Node tooling (lint and screenshots only; nothing is bundled).
+/node_modules/
+package-lock.json.bak
+
+# Local credentials for dev against a cluster (dev/port-forward).
+/.dev/
+
+# AI assistant working state.
+.claude/
+
+# Editor noise.
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Personal notes.
+resume
