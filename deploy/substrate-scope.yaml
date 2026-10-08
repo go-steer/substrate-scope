@@ -59,7 +59,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: substrate-scope
-          image: us-central1-docker.pkg.dev/gke-demos-345619/ax/substrate-scope@sha256:8997da0e7e843be02fd1a31439430e5ee5fd09cb6aba98a19a12fd9e6b9ed267
+          image: us-central1-docker.pkg.dev/gke-demos-345619/ax/substrate-scope@sha256:e10b7e90f6b1b99f13f69a8e959e8003824bfd591faeafa1c45f090d65c0bdb3
           args:
             - "--addr=:8080"
             - "--cluster=agent-substrate"
