@@ -17,6 +17,12 @@
 // with flowing links to their agents, the router (in a switchable look), and
 // the short animations that show events.
 //
+// Two layouts (decks.js): 'decks' (default) puts the agents on a glassy top
+// deck and the workers on a deck of their own below, joined by beams (one
+// per agent holding a worker) and, zoomed out, flow ribbons per atespace ->
+// node pool (beams.js); 'combined' is the single island with the worker
+// pads along its front edge and the "group by worker" view.
+//
 // Agents are drawn at three levels of detail (see lod.js): far, each
 // district is one aggregate tile (tiles.js); mid, each agent is one point
 // sprite (points.js); close, the agents nearest the camera, up to a budget,
@@ -37,18 +43,20 @@ import { CLASSES, stateClass } from './model.js';
 import { AgentLayers } from './agents.js';
 import { shapeById } from './shapes.js';
 import { buildRouter, routerId } from './routers.js';
-import { planIsland, slotPosition, slotAt, SlotTable } from './layout.js';
-import { esc, duration, since, workerLabel } from './format.js';
+import { planIsland, slotPosition, slotAt, SlotTable, CELL } from './layout.js';
+import { esc, duration, since, workerLabel, compact } from './format.js';
 import { Effects } from './effects.js';
 import { themeById, classColor, hex } from './themes.js';
-import { buildGround, hashString } from './island.js';
+import { buildGround, buildWorkerDeck, clearGroup, hashString } from './island.js';
 import { LinkSet } from './links.js';
 import { WorkerPads, PAD_H } from './pads.js';
-import { PARKED, WORKER_STRIP, groupId, groupOf, groupCounts, planWorkerView, planPadArea, focusOf, levelOf, sameFocus, workerUsage, teamHues, teamCSS } from './workers.js';
+import { PARKED, WORKER_STRIP, PAD_SPACING, groupId, groupOf, groupCounts, planWorkerView, planPadArea, focusOf, levelOf, sameFocus, workerUsage, teamHues, teamCSS } from './workers.js';
 import { PointLayer, CLASS_INDEX } from './points.js';
 import { AggregateTiles } from './tiles.js';
 import { Aggregates, RectIndex, selectNearest, pickRay, cellPixels, depthForPixels, farMix, lodLevel, FAR_LO, FAR_HI, SHAPE_PX, SHAPE_BUDGET } from './lod.js';
 import { FrameStats } from './perf.js';
+import { layoutId, deckViewId, deckAlphas, planWorkerDeck, FlowCounts, ribbonSize, ribbonLevel, litTiles, sameTile, beamSet, BEAM_BUDGET, BEAM_DROP } from './decks.js';
+import { BeamSet, RibbonSet } from './beams.js';
 
 // The active theme (see themes.js). Every state shares its class color: the
 // five class colors of a theme are validated as a set.
@@ -165,7 +173,7 @@ export class Scene {
   /**
    * @param {HTMLElement} container
    * @param {{onPick?: Function, onHover?: Function, onHoverWorker?: Function, onFocus?: Function}} handlers
-   * @param {{shape?: string, router?: string, extras?: boolean, group?: string, budget?: number, quality?: string}} opts
+   * @param {{shape?: string, router?: string, extras?: boolean, group?: string, layout?: string, budget?: number, quality?: string}} opts
    */
   constructor(container, handlers = {}, opts = {}) {
     this.container = container;
@@ -183,8 +191,27 @@ export class Scene {
     this.labelMode = 'auto';
     this.plan = null;
     this.model = null;
+    // 'decks' or 'combined' (see decks.js). Decks always group by atespace
+    // (the workers have a deck of their own); the grouping the user picked
+    // is kept for 'combined'.
+    this.layout = layoutId(opts.layout);
+    this.groupPref = groupId(opts.group);
     // 'atespace' or 'worker': what the districts are (see workers.js).
-    this.group = groupId(opts.group);
+    this.group = this.layout === 'decks' ? 'atespace' : this.groupPref;
+    // Decks: the worker deck's plan, which decks show, their fades (eased),
+    // agents per atespace -> pool pair (the ribbons), agents holding a
+    // worker (the beams), and the tile under the pointer when far.
+    this.deck = null;
+    this.deckView = 'both';
+    this.deckA = { agents: 1, workers: 1 };
+    this.fade = { agents: { value: 1 }, workers: { value: 1 }, beams: { value: 1 } };
+    this.flows = new FlowCounts();
+    this.holders = new Set();
+    this.hoverTile = null;
+    this.beamsTrimmed = false;
+    this.beams = null;
+    this.ribbons = null;
+    this.workerTiles = null;
     // What the user points at; focusOf() turns it into the worker in focus.
     this.hl = { hoverWorker: null, pinnedWorker: null, hoverAgent: null, selectedAgent: null };
     this.focus = { worker: null, strong: false };
@@ -218,7 +245,7 @@ export class Scene {
     this.reducedMotion = !!rm?.matches;
     rm?.addEventListener?.('change', (e) => {
       this.reducedMotion = e.matches;
-      this.links.setFlow(this.extras && !this.reducedMotion);
+      this.applyFlow();
     });
     // ?slowmo=N plays animations N times slower (for recording demos and
     // for screenshots with a software renderer).
@@ -312,13 +339,25 @@ export class Scene {
 
     this.world = new THREE.Group();
     scene.add(this.world);
+    // The agent deck (the whole island in 'combined'): ground and router,
+    // agents (points, and shapes in their own group), far tiles.
+    this.agentDeck = new THREE.Group();
+    this.world.add(this.agentDeck);
     this.islandGroup = new THREE.Group();
-    this.world.add(this.islandGroup);
+    this.agentDeck.add(this.islandGroup);
     this.agentGroup = new THREE.Group();
-    this.world.add(this.agentGroup);
+    this.agentDeck.add(this.agentGroup);
+    this.shapeGroup = new THREE.Group();
+    this.agentGroup.add(this.shapeGroup);
+    // The worker deck (decks layout: its height is the deck's; 'combined':
+    // 0, and only the pads are in it).
+    this.workerDeck = new THREE.Group();
+    this.world.add(this.workerDeck);
+    this.workerGround = new THREE.Group();
+    this.workerDeck.add(this.workerGround);
 
-    this.points = new PointLayer(this.agentGroup, this.time, this.look);
-    this.tiles = new AggregateTiles(this.world, this.time, this.look);
+    this.points = new PointLayer(this.agentGroup, this.time, this.look, { fade: this.fade.agents });
+    this.tiles = new AggregateTiles(this.agentDeck, this.time, this.look, { fade: this.fade.agents });
     this.buildAgents();
 
     this.effects = new Effects(this.world, this.time);
@@ -327,13 +366,23 @@ export class Scene {
 
     // Agent-to-worker links (arcs with flowing dots) and the worker pads.
     this.links = new LinkSet(this.world, this.time);
-    this.links.setFlow(this.extras && !this.reducedMotion);
+    this.applyFlow();
     const makeLabel = (cls) => {
       const div = document.createElement('div');
       div.className = cls;
       return new CSS2DObject(div);
     };
-    this.pads = new WorkerPads(this.world, makeLabel);
+    this.pads = new WorkerPads(this.workerDeck, makeLabel);
+    // Deck names beside each deck (decks layout).
+    this.deckLabels = {};
+    for (const k of ['agents', 'workers']) {
+      const l = makeLabel('deck-label');
+      l.element.classList.add(k);
+      l.center.set(1, 0.5);
+      l.visible = false;
+      this.world.add(l);
+      this.deckLabels[k] = l;
+    }
     // Labels lent to the worker platforms in view (big worker views).
     this.platformLabels = [];
     for (let i = 0; i < PLATFORM_LABELS; i++) {
@@ -406,6 +455,8 @@ export class Scene {
     );
     sea.rotation.x = -Math.PI / 2;
     sea.position.y = -1.6;
+    // Drawn first: the glass deck (decks layout) must blend over it.
+    sea.renderOrder = -2;
     this.scene.add(sea);
     this.sea = sea;
 
@@ -466,6 +517,14 @@ export class Scene {
     this.camera.updateProjectionMatrix();
     this.links.setScale(h / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))));
     this.updateLodUniforms();
+    this.sizeBeams();
+  }
+
+  /** Beams are a few device pixels wide whatever the canvas size. */
+  sizeBeams() {
+    if (!this.beams) return;
+    const v = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    this.beams.setViewport(v.x, v.y, 1.9 * this.renderer.getPixelRatio());
   }
 
   /** Pixel-dependent level-of-detail uniforms (device pixels: gl_PointSize is in them). */
@@ -539,6 +598,7 @@ export class Scene {
 
     const blend = this.blending;
     this.styleLinks();
+    this.styleDecks();
     this.marker.ring.material.color.set(t.marker.select);
     this.marker.beam.material.color.set(t.marker.select);
     this.hoverRing.material.color.set(t.marker.hover);
@@ -583,7 +643,7 @@ export class Scene {
 
   /** Builds the agent layers for the current shape. */
   buildAgents() {
-    this.agents = new AgentLayers(this.agentGroup, this.shape, this.time, this.look, { fake: this.fake });
+    this.agents = new AgentLayers(this.shapeGroup, this.shape, this.time, this.look, { fake: this.fake });
     this.layers = this.agents.layers;
     this.agents.setExtras(this.extras);
   }
@@ -630,7 +690,15 @@ export class Scene {
   setExtras(on) {
     this.extras = on;
     this.agents.setExtras(on);
-    this.links.setFlow(on && !this.reducedMotion);
+    this.applyFlow();
+  }
+
+  /** Flowing dots on links, pulses on beams and ribbons: on with extras, off with reduced motion. */
+  applyFlow() {
+    const on = this.extras && !this.reducedMotion;
+    this.links?.setFlow(on);
+    this.beams?.setFlow(on);
+    this.ribbons?.setFlow(on);
   }
 
   /** Synthetic mode: fake idle timers and request serving. */
@@ -696,6 +764,12 @@ export class Scene {
     const plan = planIsland(atespaces.length ? atespaces : [{ name: '(none)', count: 0 }]);
     plan.tiles = [...plan.districts.values()].map((d) => ({ name: d.name, kind: 'atespace', x: d.x, z: d.z, w: d.w, d: d.d, groups: [d.name] }));
     plan.frames = [];
+    if (this.layout === 'decks') {
+      // The workers get a deck of their own (planned with the island, see buildIsland).
+      plan.padArea = null;
+      plan.padFrames = [];
+      return plan;
+    }
     // The worker pads along the front edge, grouped by node pool.
     const area = planPadArea([...model.workers.values()], plan.width);
     const ox = -1.2;
@@ -735,6 +809,10 @@ export class Scene {
     this.agg.clear();
     this.hosted.clear();
     this.byWorker.clear();
+    this.flows.clear();
+    this.holders.clear();
+    this.beams?.clear();
+    this.ribbons?.clear();
     this.allShapes = keys.length <= this.baseBudget;
     this.look.uAllShapes.value = this.allShapes ? 1 : 0;
     this.points.points.visible = !this.allShapes;
@@ -762,29 +840,58 @@ export class Scene {
       this.links.remove(key);
     }
     this.links.clear();
+    // Big clusters: room for the close-up shapes up front, so their buffers
+    // don't grow (and upload) mid-flight the first time the camera comes close.
+    if (!this.allShapes) {
+      const per = Object.fromEntries(CLASSES.map((c) => [c, 0]));
+      for (const rec of this.recs.values()) per[rec.cls]++;
+      for (const c of CLASSES) per[c] = Math.min(per[c], this.baseBudget);
+      this.agents.reserve(per);
+    }
     this.rebuildWorkers();
     this.syncTiles();
     this.labelsDirty = true;
     this.lastNear.t = -1;
     this.refreshNear(true);
     this.relinkAll();
+    this.flushRibbons(true);
     this.updateMarker();
     if (fit || firstPlan) this.fitCamera();
-    if (firstPlan) this.precompile();
+    if (firstPlan || this.needCompile) this.precompile();
+    // Frames while the plan was built say nothing about the scene's speed.
+    this.frameStats.count = 0;
+    this.quality.slow = this.quality.fast = 0;
   }
 
   /**
    * Compiles every material up front, including the far tiles and points
-   * that are hidden until the camera pulls back, so the first zoom out
-   * doesn't stall on shader compiles.
+   * that are hidden until the camera pulls back and the effects that are
+   * built on demand, so neither the first zoom nor the first wake in view
+   * stalls on shader compiles.
    */
   precompile() {
-    const hidden = [this.tiles.mesh, this.points.points].filter((o) => !o.visible);
+    this.needCompile = false;
+    // Everything hidden for now (far tiles, points, extras, flowing dots,
+    // the deck layers) and one of each effect, which are otherwise built
+    // on first use: the first wake or crash in view would compile its
+    // shader mid-frame.
+    const warm = this.effects.warmup();
+    const hidden = [];
+    this.scene.traverse((o) => {
+      if (!o.visible && !o.isCSS2DObject) hidden.push(o);
+    });
     for (const o of hidden) o.visible = true;
+    // Compile the variants the frame uses: the render pass draws into the
+    // composer's buffer (no tone mapping, linear output), and three.js keys
+    // programs by that, so compiling for the screen would warm the wrong ones.
+    const target = this.renderer.getRenderTarget();
+    this.renderer.setRenderTarget(this.composer.readBuffer);
     try {
       this.renderer.compile(this.scene, this.camera);
     } finally {
+      this.renderer.setRenderTarget(target);
       for (const o of hidden) o.visible = false;
+      warm();
     }
   }
 
@@ -809,7 +916,7 @@ export class Scene {
     return true;
   }
 
-  /** Adds (sign 1) or removes (-1) an agent from the per-district and per-worker counts. */
+  /** Adds (sign 1) or removes (-1) an agent from the per-district, per-worker and per-flow counts. */
   account(rec, sign) {
     const a = rec.agent;
     if (sign > 0) this.agg.add(rec.group, rec.cls, rec.match, a.atespace);
@@ -824,6 +931,9 @@ export class Scene {
       if (!set) this.byWorker.set(w, (set = new Set()));
       set.add(rec.key);
     } else set?.delete(rec.key);
+    if (sign > 0) this.holders.add(rec.key);
+    else this.holders.delete(rec.key);
+    if (this.deck) this.flows.add(a.atespace, this.deck.poolOf.get(w), sign);
     this.dirtyPads.add(w);
     if (this.group === 'worker') this.dirtyGroups.add(w);
   }
@@ -1031,6 +1141,7 @@ export class Scene {
           this.moves.delete(key);
           this.anims.delete(key);
           this.links.remove(key);
+          this.beams?.remove(key);
           this.slots.get(rec.group)?.release(key);
         }
         continue;
@@ -1050,6 +1161,7 @@ export class Scene {
         if (this.labelAllowed(rec)) this.pinLabel(key, CHANGE_LABEL_SECONDS);
         this.lastNear.t = -1;
         this.syncLink(rec);
+        this.syncBeam(rec, true);
         continue;
       }
       const prevState = rec.agent.state;
@@ -1068,6 +1180,14 @@ export class Scene {
       this.points.setDim(rec.idx, rec.match ? 0 : 1);
       if (!moved) replan = true;
       if (prevWorker !== ev.agent.worker || prevState !== ev.agent.state) this.syncLink(rec);
+      // Decks: a beam drops when the agent gets a worker (wake), retracts
+      // when it loses it (suspend), and takes the state's color.
+      if (this.beams) {
+        if (prevWorker !== ev.agent.worker) {
+          if (ev.agent.worker) this.syncBeam(rec, true);
+          else this.beams.retract(key, now, BEAM_DROP);
+        } else if (prevState !== ev.agent.state) this.beams.setClass(key, CLASS_INDEX[rec.cls]);
+      }
       switch (ev.type) {
         case 'agent_woke': {
           if (!this.fxAllowed(rec.x, rec.z)) break;
@@ -1187,20 +1307,43 @@ export class Scene {
   // --------------------------------------------------------------- island
 
   buildIsland(clusterName) {
+    const decks = this.layout === 'decks';
+    const makeLabel = (cls) => {
+      const div = document.createElement('div');
+      div.className = cls;
+      return new CSS2DObject(div);
+    };
     this.island = buildGround(this.islandGroup, this.plan, theme, {
       cluster: clusterName,
       blending: this.blending,
-      makeLabel: (cls) => {
-        const div = document.createElement('div');
-        div.className = cls;
-        return new CSS2DObject(div);
-      },
+      makeLabel,
       makeText: textPlane,
       look: this.look,
+      glass: decks,
+      noPadRow: decks,
+      fade: this.fade.agents,
     });
     this.workerRowZ = this.island.rowZ;
+    // Decks: the worker deck under the agent deck, and its layers.
+    if (decks) {
+      this.deck = planWorkerDeck([...this.model.workers.values()], this.island);
+      this.deckGround = buildWorkerDeck(this.workerGround, this.deck, theme, { blending: this.blending, makeLabel, makeText: textPlane });
+      this.workerDeck.position.y = this.deck.y;
+      this.poolTile = new Map(this.deck.tiles.map((t) => [t.name, t]));
+      this.ribbonW = Math.max(1.2, Math.sqrt(this.island.width * this.island.depth) * 0.014);
+      this.ensureDeckLayers();
+    } else {
+      this.deck = null;
+      this.deckGround = null;
+      this.poolTile = new Map();
+      clearGroup(this.workerGround);
+      this.workerDeck.position.y = 0;
+      this.disposeDeckLayers();
+    }
+    this.sea.position.y = decks ? this.deck.y - 2.5 : -1.6;
+    this.deckFadeAt = null;
     const { width: islandW, depth: islandD } = this.island;
-    const span = Math.max(islandW, islandD * 1.5);
+    const span = Math.max(islandW, islandD * 1.5, decks ? this.deck.gap * 2.2 : 0);
 
     // Shadows cover the island (big islands: the part around the camera's
     // target, see frame()).
@@ -1254,21 +1397,49 @@ export class Scene {
    */
   layoutDistrictLabels() {
     if (!this.plan) return;
-    const W = this.renderer.domElement.clientWidth;
-    const H = this.renderer.domElement.clientHeight;
-    const a = new THREE.Vector3();
-    const b = new THREE.Vector3();
-    const ds = this.districtLabelEls().sort((x, y) => y.area - x.area);
     // The selected agent's label wins over district labels.
     const placed = [];
     const sel = this.agentBoxes?.find((q) => q.selected);
     if (sel) placed.push(sel);
+    this.districtBoxes = this.placeLabels(this.districtLabelEls(), placed);
+    // Decks: the worker deck's labels have a budget of their own (they
+    // never compete with the agent deck's), so both decks stay labeled.
+    this.deckBoxes = [];
+    if (this.deck && this.deckA.workers > 0.5) {
+      const y = this.deck.y;
+      const ds = this.deck.frames.filter((f) => f.label).map((f) => ({ el: f.label, x0: f.x, x1: f.x + f.w, z: f.z + f.d / 2, ax: f.x + 0.5, az: f.z + (f.strip ?? 2) / 2, area: f.w * f.d, y }));
+      // A worker's card (hovered or pinned) wins over the pool labels around it.
+      const obstacles = [...(this.deckTitleBoxes || [])];
+      const pad = this.focus.strong && this.pads.get(this.focus.worker);
+      if (pad) {
+        const q = new THREE.Vector3(pad.x, y + 0.2, pad.z + 1.15).project(this.camera);
+        const sx = (q.x * 0.5 + 0.5) * this.renderer.domElement.clientWidth;
+        const sy = (-q.y * 0.5 + 0.5) * this.renderer.domElement.clientHeight;
+        obstacles.push({ x0: sx - 130, x1: sx + 130, y0: sy - 6, y1: sy + 135 });
+      }
+      this.deckBoxes = this.placeLabels(ds, obstacles);
+    }
+  }
+
+  /**
+   * Places district-style labels greedily, biggest area first, around
+   * obstacles (placed, which grows): each fits its district's width (full,
+   * compact, tiny) or is hidden ("crowded") when it would overlap. Returns
+   * the boxes placed.
+   */
+  placeLabels(list, placed) {
+    const W = this.renderer.domElement.clientWidth;
+    const H = this.renderer.domElement.clientHeight;
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const ds = list.sort((x, y) => y.area - x.area);
     const boxes = [];
     // Sizes are estimated from the text and positions projected from the
     // anchors, so the pass never reads layout (no forced reflows).
     for (const d of ds) {
-      a.set(d.x0, 0, d.z).project(this.camera);
-      b.set(d.x1, 0, d.z).project(this.camera);
+      const y = d.y || 0;
+      a.set(d.x0, y, d.z).project(this.camera);
+      b.set(d.x1, y, d.z).project(this.camera);
       const px = (Math.abs(b.x - a.x) / 2) * W;
       // Fit the label inside its district's width: full, then without
       // chips, then name only.
@@ -1279,7 +1450,7 @@ export class Scene {
       cl.toggle('tiny', mode === 'tiny');
       const w = mode === '' ? est.full : mode === 'compact' ? est.compact : est.tiny;
       const h = mode === 'tiny' ? est.th : est.h;
-      a.set(d.ax, 0.2, d.az).project(this.camera);
+      a.set(d.ax, y + 0.2, d.az).project(this.camera);
       const sx = (a.x * 0.5 + 0.5) * W;
       const sy = (-a.y * 0.5 + 0.5) * H;
       const box = { x0: sx - 4, x1: sx + w + 4, y0: sy - h / 2 - 2, y1: sy + h / 2 + 2 };
@@ -1291,7 +1462,37 @@ export class Scene {
         boxes.push(box);
       }
     }
-    this.districtBoxes = boxes;
+    return boxes;
+  }
+
+  /**
+   * Decks: the deck names ("Agents", "Workers") with their counts, to the
+   * right of each deck; their boxes start the worker deck's label pass.
+   */
+  layoutDeckLabels() {
+    const L = this.deckLabels;
+    if (this.layout !== 'decks' || !this.deck || !this.model) {
+      L.agents.visible = L.workers.visible = false;
+      this.deckTitleBoxes = [];
+      return;
+    }
+    const I = this.island;
+    const D = this.deck;
+    L.agents.position.set(I.cx + I.width / 2 + 1.5, 0, I.cz);
+    L.workers.position.set(D.cx + D.width / 2 + 1.5, D.y, D.cz);
+    L.agents.center.set(0, 0.5);
+    L.workers.center.set(0, 0.5);
+    L.agents.visible = this.deckA.agents > 0.5;
+    L.workers.visible = this.deckA.workers > 0.5;
+    const pools = this.deck.tiles.length;
+    setHTML(L.agents.element, `<div class="name">Agents</div><div class="meta">${compact(this.model.agents.size)} · ${this.plan.districts.size} atespace${this.plan.districts.size === 1 ? '' : 's'}</div>`);
+    setHTML(L.workers.element, `<div class="name">Workers</div><div class="meta">${compact(this.model.workers.size)} · ${pools} pool${pools === 1 ? '' : 's'} · ${compact(this.holders.size)} agents on them</div>`);
+    const W = this.renderer.domElement.clientWidth;
+    const H = this.renderer.domElement.clientHeight;
+    const p = L.workers.position.clone().project(this.camera);
+    const x = (p.x * 0.5 + 0.5) * W;
+    const y = (-p.y * 0.5 + 0.5) * H;
+    this.deckTitleBoxes = [{ x0: x - 4, x1: x + 190, y0: y - 22, y1: y + 22 }];
   }
 
   /** A worker platform's label HTML: name, node, fill, and the atespaces it runs. */
@@ -1326,6 +1527,12 @@ export class Scene {
       d.label.classList.toggle('focused', d.kind === 'worker' && this.focus.worker === d.name);
     }
     // Node pools: name, workers, agents and what they run.
+    for (const f of this.deck?.frames || []) {
+      if (!f.label) continue;
+      let hosted = 0;
+      for (const w of f.workers) hosted += this.hosted.get(w) || 0;
+      setHTML(f.label, `<div class="name">${esc(f.name || 'pool')}</div><div class="meta">${f.workers.length} workers · ${compact(hosted)} agents</div>`);
+    }
     for (const f of [...(this.plan.frames || []), ...(this.plan.padFrames || [])]) {
       if (!f.label) continue;
       const c = this.agg.sum(f.workers);
@@ -1381,6 +1588,7 @@ export class Scene {
   syncTiles() {
     this.tiles.sync(this.plan.tiles || [], (t) => (t.groups.length === 1 ? this.agg.get(t.groups[0]) : this.agg.sum(t.groups)));
     this.dirtyGroups.clear();
+    if (this.litSet) this.relightTiles();
   }
 
   /** Rewrites the tiles whose districts changed. */
@@ -1392,7 +1600,7 @@ export class Scene {
       if (i === undefined || done.has(i)) continue;
       done.add(i);
       const t = this.tiles.tiles[i];
-      this.tiles.write(i, t.groups.length === 1 ? this.agg.get(t.groups[0]) : this.agg.sum(t.groups));
+      this.tiles.write(i, t.groups.length === 1 ? this.agg.get(t.groups[0]) : this.agg.sum(t.groups), t.kind === 'atespace' ? this.tileLit('atespace', t.name) : 0);
     }
     this.dirtyGroups.clear();
   }
@@ -1411,8 +1619,9 @@ export class Scene {
         items.push({ worker: wk, x: d.x + d.w - 3.2 / 2 - 0.45, z: d.z + WORKER_STRIP / 2, usage: workerUsage(wk, this.hosted.get(wk.name) || 0) });
       }
     } else {
-      // The pad area along the island's front edge (planned with the island).
-      for (const it of this.plan.padArea?.items || []) {
+      // The pad area along the island's front edge (planned with the
+      // island), or the worker deck (decks layout).
+      for (const it of (this.deck ? this.deck.items : this.plan.padArea?.items) || []) {
         const wk = this.model.workers.get(it.name);
         if (wk) items.push({ worker: wk, x: it.x, z: it.z, usage: workerUsage(wk, this.hosted.get(wk.name) || 0) });
       }
@@ -1421,16 +1630,341 @@ export class Scene {
     this.pads.setFocus(this.focus);
     this.dirtyPads.clear();
     this.relinkAll();
+    if (this.beams) {
+      // Pads moved: every beam's lower end with them.
+      this.beams.clear();
+      this.rebeamAll();
+      this.syncWorkerTiles();
+    }
   }
 
-  /** Rewrites the pads whose worker or hosted count changed. */
+  /** Rewrites the pads whose worker or hosted count changed (and, decks, their pools' far tiles). */
   flushPads() {
     if (!this.dirtyPads.size || !this.model) return;
+    const pools = new Set();
     for (const name of this.dirtyPads) {
       const wk = this.model.workers.get(name);
       if (wk) this.pads.update(name, wk, workerUsage(wk, this.hosted.get(name) || 0));
+      if (this.deck) pools.add(this.deck.poolOf.get(name));
     }
     this.dirtyPads.clear();
+    if (this.workerTiles) {
+      for (const pool of pools) {
+        const i = this.workerTiles.tileOf(pool);
+        if (i !== undefined) this.workerTiles.write(i, this.poolCounts(this.workerTiles.tiles[i]), this.tileLit('pool', pool));
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- decks
+
+  /** Creates the decks layout's layers: beams, ribbons and the node pools' far tiles. */
+  ensureDeckLayers() {
+    if (this.beams) return;
+    this.beams = new BeamSet(this.world, this.time, this.look, this.fade.beams);
+    this.beams.uniforms.uDrop.value = BEAM_DROP;
+    this.ribbons = new RibbonSet(this.world, this.time, this.look, this.fade.beams);
+    this.workerTiles = new AggregateTiles(this.workerDeck, this.time, this.look, { y: PAD_H + 0.12, cell: PAD_SPACING, fade: this.fade.workers });
+    this.beamKeys = new Set();
+    this.applyFlow();
+    this.styleDecks();
+    this.sizeBeams?.();
+    this.needCompile = true;
+  }
+
+  /** Disposes the decks layout's layers (switching to 'combined'). */
+  disposeDeckLayers() {
+    if (!this.beams) return;
+    this.beams.dispose();
+    this.ribbons.dispose();
+    this.workerTiles.dispose();
+    this.beams = this.ribbons = this.workerTiles = null;
+    this.beamKeys = new Set();
+    this.beamsTrimmed = false;
+    this.hoverTile = null;
+    this.litSet = null;
+  }
+
+  /** Beam, ribbon and pool tile colors from the theme; the beams' rest alpha thins out as their number grows. */
+  styleDecks() {
+    if (!this.beams) return;
+    const colors = Object.fromEntries(CLASSES.map((c) => [c, classColor(theme, c)]));
+    const additive = theme.glow.additive;
+    const n = Math.max(this.beams.count, 1);
+    const a = additive ? 0.55 : 0.7;
+    this.beams.setLook(colors, theme.links.highlight, this.blending, Math.min(a, Math.max(additive ? 0.05 : 0.08, a * Math.sqrt(60 / n))), 0.95);
+    // Many ribbons add up (additive on dark themes): fainter as they grow in number.
+    const nr = Math.max(1, this.flows.pairs.size);
+    this.ribbons.setLook(colors.running, theme.worker.active, theme.links.highlight, this.blending, (additive ? 0.5 : 0.7) * Math.min(1, Math.max(additive ? 0.14 : 0.24, Math.sqrt(60 / nr))));
+    const w = theme.worker;
+    this.workerTiles.setColors({ running: w.fill, transition: w.full, suspended: w.idle, crashed: w.draining, pending: w.idle }, THREE.NormalBlending);
+    this.beamCountStyled = n;
+  }
+
+  /**
+   * A node pool's far tile counts, in AggregateTiles' terms: busy workers
+   * (hosting agents) as "running", full ones (90%+ of their slots) as
+   * "changing", draining ones as "crashed" (they pulse), idle ones as the
+   * rest.
+   */
+  poolCounts(tile) {
+    const c = { total: tile.groups.length, running: 0, transition: 0, suspended: 0, crashed: 0, pending: 0, match: tile.groups.length };
+    for (const name of tile.groups) {
+      const wk = this.model.workers.get(name);
+      const n = this.hosted.get(name) || 0;
+      if (wk?.state === 'DRAINING') c.crashed++;
+      else if (!n) c.suspended++;
+      else if (wk?.capacityActors && n / wk.capacityActors >= 0.9) c.transition++;
+      else c.running++;
+    }
+    return c;
+  }
+
+  /** Lays out the node pools' far tiles and writes their counts. */
+  syncWorkerTiles() {
+    if (!this.workerTiles || !this.deck) return;
+    this.workerTiles.sync(this.deck.tiles, (t) => this.poolCounts(t));
+    this.relightTiles();
+  }
+
+  /** 1 when a far tile is lit by the hovered tile (it or the other end of its ribbons), else 0. */
+  tileLit(kind, name) {
+    const s = this.litSet;
+    if (!s) return 0;
+    return (kind === 'pool' ? s.pools : s.atespaces).has(name) ? 1 : 0;
+  }
+
+  /** Rewrites every far tile's lit flag (the hovered tile changed). */
+  relightTiles() {
+    if (this.group !== 'atespace') return;
+    this.tiles.tiles.forEach((t, i) => this.tiles.write(i, this.agg.get(t.groups[0]), this.tileLit('atespace', t.name)));
+    this.workerTiles?.tiles.forEach((t, i) => this.workerTiles.write(i, this.poolCounts(t), this.tileLit('pool', t.name)));
+  }
+
+  /** Whether an agent gets a beam: it holds a worker with a pad, and fits the budget (or must show). */
+  beamAllowed(rec) {
+    const w = rec.agent.worker;
+    if (!this.beams || !w || !this.pads.get(w)) return false;
+    if (!this.beamsTrimmed) return true;
+    return this.beamKeys.has(rec.key) || rec.key === this.selected || rec.key === this.hovered || w === this.focus.worker;
+  }
+
+  /** Adds, moves or drops an agent's beam; drop: animate it falling to the pad (a wake). */
+  syncBeam(rec, drop = false) {
+    if (!rec || !this.beams) return;
+    if (!this.beamAllowed(rec)) {
+      if (!this.beams.retracting.has(rec.key)) this.beams.remove(rec.key);
+      return;
+    }
+    const pad = this.pads.get(rec.agent.worker);
+    const to = { x: pad.pos.x, y: pad.pos.y + this.deck.y, z: pad.pos.z };
+    this.beams.set(rec.key, { x: rec.x, y: 0.1, z: rec.z }, to, CLASS_INDEX[rec.cls], this.workerIndex(rec.agent.worker), rec.seed, rec.idx, drop ? this.time.value : undefined);
+  }
+
+  /**
+   * Picks the agents with beams (all holders while they fit BEAM_BUDGET,
+   * else the nearest in view plus the focus) and syncs the beams to it.
+   * Trimmed beams leave the ribbons visible as a floor, so the rest of the
+   * flow still reads.
+   */
+  rebeamAll() {
+    if (!this.beams) return;
+    const must = [this.selected, this.hovered, ...(this.byWorker.get(this.focus.worker) || [])].filter(Boolean);
+    const sel = beamSet(this.holders, BEAM_BUDGET, () => this.nearestHolders(), must);
+    this.beamsTrimmed = sel.trimmed;
+    this.beamKeys = sel.keys;
+    for (const k of [...this.beams.keys]) if (!sel.keys.has(k) && !this.beams.retracting.has(k)) this.beams.remove(k);
+    for (const k of sel.keys) if (!this.beams.has(k)) this.syncBeam(this.recs.get(k));
+    this.ribbons.setMin(this.beamsTrimmed ? 0.12 : 0);
+    this.styleDecks();
+    this.applyBeamFocus();
+  }
+
+  /** The agents holding a worker nearest the camera, in view (at most the beam budget). */
+  nearestHolders() {
+    const sub = new Int32Array(this.holders.size);
+    let k = 0;
+    for (const key of this.holders) {
+      const r = this.recs.get(key);
+      if (r) sub[k++] = r.idx;
+    }
+    const planes = this.frustum().planes.map((p) => ({ x: p.normal.x, y: p.normal.y, z: p.normal.z, c: p.constant }));
+    const pts = this.points;
+    const { idx } = selectNearest(pts.attrs.position.array, pts.live, pts.hwm, this.camera.position, BEAM_BUDGET, 1e9, planes, 8, sub.subarray(0, k));
+    return Array.from(idx, (i) => this.keyOfIdx[i]).filter(Boolean);
+  }
+
+  /** The beams' focus uniforms: the worker in focus, and the selected and hovered agents. */
+  applyBeamFocus() {
+    if (!this.beams) return;
+    const f = this.focus;
+    const idx = (key) => this.recs.get(key)?.idx ?? -10;
+    this.beams.setFocus(f.worker ? this.workerIndex(f.worker) : -1, f.strong, this.selected ? idx(this.selected) : -10, this.hovered ? idx(this.hovered) : -10);
+  }
+
+  /**
+   * Writes the ribbons whose pair changed (all: every pair). Widths are
+   * relative to the biggest pair, so when that moves by more than 5% every
+   * ribbon is rewritten.
+   */
+  flushRibbons(all = false) {
+    if (!this.ribbons || !this.deck || !this.plan) return;
+    let keys = this.flows.take();
+    const max = this.flows.max();
+    if (all || !this.ribbonMax || Math.abs(max - this.ribbonMax) > this.ribbonMax * 0.05) {
+      this.ribbonMax = max;
+      keys = [...this.flows.pairs.keys()];
+    }
+    if (!keys.length) return;
+    const f = this.focus;
+    const focusPool = f.worker ? this.deck.poolOf.get(f.worker) : null;
+    for (const key of keys) {
+      const p = this.flows.pairs.get(key);
+      const d = p && this.plan.districts.get(p.atespace);
+      const t = p && this.poolTile.get(p.pool);
+      if (!d || !t) {
+        this.ribbons.remove(key);
+        continue;
+      }
+      const { width, strength } = ribbonSize(p.count, this.ribbonMax, this.ribbonW);
+      this.ribbons.set(
+        key,
+        { x: d.x + d.w / 2, y: -2, z: d.z + d.d / 2 },
+        { x: t.x + t.w / 2, y: this.deck.y + PAD_H + 0.2, z: t.z + t.d / 2 },
+        width,
+        strength,
+        ribbonLevel(p, this.hoverTile, focusPool, f.strong),
+        hashString(key),
+      );
+    }
+  }
+
+  /** Re-levels every ribbon (the hovered tile or the worker in focus changed). */
+  relevelRibbons() {
+    if (!this.ribbons || !this.deck) return;
+    const f = this.focus;
+    const focusPool = f.worker ? this.deck.poolOf.get(f.worker) : null;
+    for (const key of this.ribbons.keys) {
+      const p = this.flows.pairs.get(key);
+      if (p) this.ribbons.setLevel(key, ribbonLevel(p, this.hoverTile, focusPool, f.strong));
+    }
+  }
+
+  /** The far tile under the pointer (decks): an atespace on the agent deck, or a node pool below. */
+  setHoverTile(tile) {
+    if (sameTile(tile, this.hoverTile)) return;
+    this.hoverTile = tile;
+    this.litSet = tile ? litTiles(this.flows, tile) : null;
+    this.relevelRibbons();
+    this.relightTiles();
+    this.handlers.onHoverTile?.(tile, tile ? this.tileInfo(tile) : null);
+  }
+
+  /** What a far tile carries: running agents and the tiles at the other end. */
+  tileInfo(tile) {
+    let agents = 0;
+    let ends = 0;
+    for (const p of this.flows.pairs.values()) {
+      if (p.count <= 0) continue;
+      if ((tile.kind === 'atespace' && p.atespace === tile.name) || (tile.kind === 'pool' && p.pool === tile.name)) {
+        agents += p.count;
+        ends++;
+      }
+    }
+    const workers = tile.kind === 'pool' ? this.poolTile.get(tile.name)?.groups.length || 0 : 0;
+    return { ...tile, agents, ends, workers, total: tile.kind === 'atespace' ? this.agg.get(tile.name).total : 0 };
+  }
+
+  /** Whether the ground at (x, y, z) is drawn far (cells of size cell under the far threshold). */
+  farAt(x, y, z, cell) {
+    const p = new THREE.Vector3(x, y, z).applyMatrix4(this.camera.matrixWorldInverse);
+    return farMix(cellPixels(-p.z, this.viewH(), this.camera.fov, cell)) > 0.5;
+  }
+
+  /** The far tile under a client position (decks), or null. */
+  pickTile(clientX, clientY) {
+    if (!this.deck) return null;
+    const ray = this.rayAt(clientX, clientY);
+    if (ray.direction.y > -1e-4) return null;
+    const at = (y) => {
+      const t = (y - ray.origin.y) / ray.direction.y;
+      return t > 0 ? { x: ray.origin.x + ray.direction.x * t, z: ray.origin.z + ray.direction.z * t } : null;
+    };
+    if (this.deckA.agents > 0.5) {
+      const p = at(0.15);
+      const d = p && this.distIndex.at(p.x, p.z);
+      if (d && this.farAt(p.x, 0, p.z, CELL)) return { kind: 'atespace', name: d.name };
+    }
+    if (this.deckA.workers > 0.5) {
+      const y = this.deck.y + PAD_H;
+      const p = at(y);
+      const t = p && this.deck.tiles.find((q) => p.x >= q.x && p.x <= q.x + q.w && p.z >= q.z && p.z <= q.z + q.d);
+      if (t && this.farAt(p.x, y, p.z, PAD_SPACING)) return { kind: 'pool', name: t.name };
+    }
+    return null;
+  }
+
+  /** Switches between the two decks and the single island; resources of the other layout are disposed. */
+  setLayout(id) {
+    id = layoutId(id);
+    if (id === this.layout) return;
+    this.layout = id;
+    this.group = id === 'decks' ? 'atespace' : this.groupPref;
+    this.deckView = 'both';
+    this.deckA = { agents: 1, workers: 1 };
+    this.applyDeckFade(true);
+    this.setHoverTile(null);
+    if (!this.model) return;
+    this.replan(true);
+  }
+
+  /** Decks: 'both', or one deck with the other faded out; the camera frames what shows. */
+  setDeckView(view, fly = true) {
+    if (this.layout !== 'decks') return;
+    this.deckView = deckViewId(view);
+    if (fly && this.island) this.fitCamera(true);
+  }
+
+  /** Eases the decks' fades toward the view's targets (decks layout). */
+  updateDeckFade(dt) {
+    if (this.layout !== 'decks') return;
+    const tgt = deckAlphas(this.deckView);
+    const k = this.reducedMotion ? 1 : 1 - Math.exp(-dt * 7);
+    let moved = false;
+    for (const d of ['agents', 'workers']) {
+      let v = this.deckA[d] + (tgt[d] - this.deckA[d]) * k;
+      if (Math.abs(tgt[d] - v) < 0.004) v = tgt[d];
+      if (v !== this.deckA[d]) moved = true;
+      this.deckA[d] = v;
+    }
+    if (moved || this.deckFadeAt === null) this.applyDeckFade();
+  }
+
+  /** Applies the decks' fades: uniforms, glass and deck materials, and what hides when faded out. */
+  applyDeckFade(reset = false) {
+    const a = reset ? 1 : this.deckA.agents;
+    const b = reset ? 1 : this.deckA.workers;
+    this.deckFadeAt = this.time.value;
+    this.fade.agents.value = a;
+    this.fade.workers.value = b;
+    this.fade.beams.value = Math.min(a, b);
+    for (const g of this.island?.glass || []) g.mat.opacity = g.opacity * a;
+    for (const g of this.deckGround?.mats || []) {
+      g.mat.opacity = g.opacity * b;
+      // Opaque (sorted with the solid scene) unless fading or see-through by design.
+      const see = g.opacity * b < 0.999;
+      if (g.mat.transparent !== see) {
+        g.mat.transparent = see;
+        g.mat.needsUpdate = true;
+      }
+    }
+    this.agentDeck.visible = a > 0.01;
+    this.shapeGroup.visible = a > 0.5;
+    this.workerDeck.visible = b > 0.01;
+    for (const m of Object.values(this.pads.mesh)) m.visible = b > 0.5;
+    if (this.router?.group) this.router.group.visible = a > 0.5;
+    this.marker.group.visible = !!(this.selected && this.recs.get(this.selected)) && a > 0.5;
+    if (a <= 0.5 && this.hoverRing) this.hoverRing.visible = false;
   }
 
   /** How busy an agent's link looks: 0 idle to 1 serving (more, faster dots). */
@@ -1446,6 +1980,8 @@ export class Scene {
    * the selected or hovered agent. 100,000 arcs would be noise.
    */
   wantsLink(rec) {
+    // Decks: beams instead.
+    if (this.layout === 'decks') return false;
     const w = rec.agent.worker;
     if (!w || !this.pads.get(w)) return false;
     return rec.slot >= 0 || w === this.focus.worker || rec.key === this.selected || rec.key === this.hovered;
@@ -1605,6 +2141,27 @@ export class Scene {
       const far = d + Math.max(this.island.width, this.island.depth);
       this.tiles.mesh.visible = farMix(cellPixels(far, this.viewH(), this.camera.fov)) > 0;
     }
+    // Beams draw only where some agent cell is big enough for them (or one
+    // is lit); ribbons only where some district is far (or beams are trimmed).
+    if (this.beams && this.island) {
+      const I = this.island;
+      const cam = this.camera.position;
+      const vh = this.viewH();
+      const fov = this.camera.fov;
+      const dx = Math.max(I.cx - I.width / 2 - cam.x, 0, cam.x - (I.cx + I.width / 2));
+      const dz = Math.max(I.cz - I.depth / 2 - cam.z, 0, cam.z - (I.cz + I.depth / 2));
+      const nearest = Math.hypot(dx, cam.y, dz);
+      const farthest = d + Math.max(I.width, I.depth);
+      const lit = !!(this.focus.worker || this.selected || this.hovered);
+      const shown = this.fade.beams.value > 0.004;
+      this.beams.lines.visible = shown && (lit || farMix(cellPixels(nearest, vh, fov) * 1.5) < 1);
+      this.ribbons.mesh.visible = shown && (this.beamsTrimmed || !!this.hoverTile || farMix(cellPixels(farthest, vh, fov)) > 0);
+    }
+    if (this.workerTiles && this.deck) {
+      const D = this.deck;
+      const far = this.camera.position.distanceTo(new THREE.Vector3(D.cx, D.y, D.cz)) + Math.max(D.width, D.depth);
+      this.workerTiles.mesh.visible = farMix(cellPixels(far, this.viewH(), this.camera.fov, PAD_SPACING)) > 0;
+    }
   }
 
   // ------------------------------------------------------------ highlight
@@ -1632,6 +2189,12 @@ export class Scene {
     for (const k of this.links.keys) this.links.setLevel(k, levelOf(f, this.recs.get(k)?.agent.worker));
     this.styleLinks();
     this.pads.setFocus(f);
+    // Beams: the focused worker's agents must have one (budget or not).
+    if (this.beams) {
+      if (this.beamsTrimmed) for (const w of new Set([before, f.worker])) for (const k of this.byWorker.get(w) || []) this.syncBeam(this.recs.get(k));
+      this.applyBeamFocus();
+      this.relevelRibbons();
+    }
     this.labelsDirty = true;
     this.lastLabelUpdate = -1;
     this.handlers.onFocus?.(f);
@@ -1652,7 +2215,7 @@ export class Scene {
     const pad = this.pads.get(name);
     if (!pad) return;
     const d = this.group === 'worker' && this.plan.districts.get(name);
-    const target = d ? new THREE.Vector3(d.x + d.w / 2, 0.5, d.z + d.d / 2) : pad.pos.clone();
+    const target = d ? new THREE.Vector3(d.x + d.w / 2, 0.5, d.z + d.d / 2) : pad.pos.clone().setY(pad.pos.y + (this.deck?.y || 0));
     const dir = this.camera.position.clone().sub(this.controls.target).normalize();
     const dist = Math.max(Math.min(this.camera.position.distanceTo(this.controls.target), 60), 40);
     this.flyAnim = { t0: this.time.value, dur: 0.9, fromT: this.controls.target.clone(), toT: target, fromC: this.camera.position.clone(), toC: target.clone().add(dir.multiplyScalar(dist)) };
@@ -1663,7 +2226,9 @@ export class Scene {
   /** Switches between atespace and worker districts; agents glide to their new cells. */
   setGroup(mode) {
     mode = groupId(mode);
-    if (mode === this.group) return;
+    this.groupPref = mode;
+    // Decks group by atespace; the choice waits for 'combined'.
+    if (this.layout === 'decks' || mode === this.group) return;
     this.group = mode;
     if (!this.model) return;
     this.replan(false, true);
@@ -1685,6 +2250,10 @@ export class Scene {
     // so the island (and the router tower on its left edge) clears the panel.
     const W = this.renderer.domElement.clientWidth || window.innerWidth;
     const inset = Math.min(this.leftInset || 0, W * 0.4);
+    if (this.layout === 'decks' && this.deck) {
+      this.fitDecks(smooth, W, inset);
+      return;
+    }
     const span = Math.max(this.island.width, this.island.depth * 1.5);
     const dist = Math.max(26, span * 0.95) * (W / (W - inset));
     const viewW = 2 * dist * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) * this.camera.aspect;
@@ -1694,6 +2263,46 @@ export class Scene {
     const cz = this.island.cz + 0.5 + (inset ? this.island.depth * 0.05 : 0);
     const toT = new THREE.Vector3(cx, 0, cz);
     const toC = new THREE.Vector3(cx + dist * 0.1, dist * 0.56, cz + dist * 0.84);
+    if (smooth) {
+      this.flyAnim = { t0: this.time.value, dur: 0.9, fromT: this.controls.target.clone(), toT, fromC: this.camera.position.clone(), toC };
+      return;
+    }
+    this.flyAnim = null;
+    this.controls.target.copy(toT);
+    this.camera.position.copy(toC);
+    this.controls.update();
+  }
+
+  /**
+   * Decks: frames what the deck view shows. Both decks: from a lower angle
+   * (about 25 degrees), aimed between them, far enough back for the stack;
+   * one deck: like the single island, at that deck's height.
+   */
+  fitDecks(smooth, W, inset) {
+    const I = this.island;
+    const D = this.deck;
+    const view = this.deckView;
+    let toT;
+    let toC;
+    if (view === 'both') {
+      const span = Math.max(I.width, D.width, I.depth * 1.5, D.depth * 1.5);
+      const height = Math.abs(D.y);
+      const dist = Math.max(34, span * 1.12, height * 2.9) * (W / (W - inset));
+      const viewW = 2 * dist * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) * this.camera.aspect;
+      const cx = I.cx - (inset / 2 / W) * viewW;
+      const cz = I.cz + I.depth * 0.08;
+      toT = new THREE.Vector3(cx, D.y * 0.42, cz);
+      toC = new THREE.Vector3(cx + dist * 0.12, D.y * 0.42 + dist * 0.43, cz + dist * 0.9);
+    } else {
+      const b = view === 'agents' ? { cx: I.cx, cz: I.cz, w: I.width, d: I.depth, y: 0 } : { cx: D.cx, cz: D.cz, w: D.width, d: D.depth, y: D.y };
+      const span = Math.max(b.w, b.d * 1.5);
+      const dist = Math.max(26, span * 0.95) * (W / (W - inset));
+      const viewW = 2 * dist * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) * this.camera.aspect;
+      const cx = b.cx - (inset / 2 / W) * viewW;
+      const cz = b.cz + 0.5;
+      toT = new THREE.Vector3(cx, b.y, cz);
+      toC = new THREE.Vector3(cx + dist * 0.1, b.y + dist * 0.56, cz + dist * 0.84);
+    }
     if (smooth) {
       this.flyAnim = { t0: this.time.value, dur: 0.9, fromT: this.controls.target.clone(), toT, fromC: this.camera.position.clone(), toC };
       return;
@@ -1726,8 +2335,10 @@ export class Scene {
     this.hl.selectedAgent = key;
     this.lastLabelUpdate = -1;
     for (const k of [before, key]) if (k) this.syncLink(this.recs.get(k));
+    for (const k of [before, key]) if (k) this.syncBeam(this.recs.get(k));
     this.updateMarker();
     this.refreshFocus();
+    this.applyBeamFocus();
   }
 
   updateMarker() {
@@ -1736,7 +2347,7 @@ export class Scene {
       this.marker.group.visible = false;
       return;
     }
-    this.marker.group.visible = true;
+    this.marker.group.visible = this.layout !== 'decks' || this.deckA.agents > 0.5;
     this.marker.group.position.set(rec.x, 0.14, rec.z);
     const top = this.topOf(rec);
     this.marker.beam.scale.y = 3;
@@ -1788,9 +2399,9 @@ export class Scene {
 
   /** The agent under a client position: the ray walks the agent grid (lod.js pickRay), no per-instance raycasting. */
   pick(clientX, clientY) {
-    if (!this.plan) return null;
+    if (!this.plan || (this.layout === 'decks' && this.deckA.agents < 0.5)) return null;
     const ray = this.rayAt(clientX, clientY);
-    return pickRay(ray.origin, ray.direction, {
+    const key = pickRay(ray.origin, ray.direction, {
       lookup: (x, z) => {
         const d = this.distIndex.at(x, z);
         if (!d) return null;
@@ -1803,13 +2414,21 @@ export class Scene {
         return { x: rec.x, z: rec.z, y0: 0.1, y1: Math.max(0.5, this.topOf(rec)), r: 0.62 };
       },
     });
+    // Decks: where a district is drawn as its far tile, its agents aren't
+    // on screen; the pointer is over the tile (see pickTile), not an agent.
+    if (key && this.deck) {
+      const rec = this.recs.get(key);
+      if (rec && this.farAt(rec.x, 0, rec.z, CELL)) return null;
+    }
+    return key;
   }
 
   /** The worker pad under the pointer, by worker name. */
   pickWorker(clientX, clientY) {
+    if (this.layout === 'decks' && this.deckA.workers < 0.5) return null;
     const ray = this.rayAt(clientX, clientY);
     if (ray.direction.y > -1e-4) return null;
-    const t = (PAD_H - ray.origin.y) / ray.direction.y;
+    const t = (PAD_H + (this.deck?.y || 0) - ray.origin.y) / ray.direction.y;
     if (t <= 0) return null;
     return this.pads.at(ray.origin.x + ray.direction.x * t, ray.origin.z + ray.direction.z * t);
   }
@@ -1823,7 +2442,9 @@ export class Scene {
       if (rec) this.hoverRing.position.set(rec.x, 0.15, rec.z);
       this.hl.hoverAgent = key || null;
       for (const k of [before, key]) if (k) this.syncLink(this.recs.get(k));
+      if (this.beamsTrimmed) for (const k of [before, key]) if (k) this.syncBeam(this.recs.get(k));
       this.refreshFocus();
+      this.applyBeamFocus();
     }
     this.handlers.onHover?.(key, x, y);
   }
@@ -1845,7 +2466,7 @@ export class Scene {
    */
   adaptQuality(t) {
     const q = this.quality;
-    if (q.mode !== 'auto' || t - q.lastCheck < 1) return;
+    if (q.mode !== 'auto' || q.held || t - q.lastCheck < 1) return;
     q.lastCheck = t;
     const f = this.frameStats.summary();
     if (this.frameStats.count < 30) return;
@@ -1947,9 +2568,13 @@ export class Scene {
     }
     this.camera.updateMatrixWorld();
 
-    // Level of detail: which agents are shapes, and the crossfade radius.
+    // Level of detail: which agents are shapes, and the crossfade radius;
+    // trimmed beams follow the camera at the same pace.
+    const nearAt = this.lastNear.t;
     this.refreshNear();
+    if (this.beamsTrimmed && this.lastNear.t !== nearAt) this.rebeamAll();
     this.updateLod(dt);
+    this.updateDeckFade(dt);
     // Big islands: shadows cover the part around the camera's target.
     if (this.island && Math.max(this.island.width, this.island.depth) > 200) {
       const d = this.camera.position.distanceTo(this.controls.target);
@@ -1964,6 +2589,11 @@ export class Scene {
     this.agents.flush();
     this.points.flush();
     this.links.flush();
+    if (this.beams) {
+      this.beams.expire(t);
+      this.beams.flush();
+      this.ribbons.flush();
+    }
 
     // Selection marker pulse, router beacon.
     if (this.marker.group.visible) {
@@ -1978,21 +2608,31 @@ export class Scene {
       this.lastHoverPick = t;
       const key = this.pick(this.hoverAt.x, this.hoverAt.y);
       this.setHover(key, this.hoverAt.x, this.hoverAt.y);
-      this.setHoverWorker(key ? null : this.pickWorker(this.hoverAt.x, this.hoverAt.y));
+      const worker = key ? null : this.pickWorker(this.hoverAt.x, this.hoverAt.y);
+      this.setHoverWorker(worker);
+      if (this.deck) this.setHoverTile(key || worker ? null : this.pickTile(this.hoverAt.x, this.hoverAt.y));
     }
 
     if (t - this.lastLabelUpdate > LABEL_EVERY || this.lastLabelUpdate < 0) {
       this.lastLabelUpdate = t;
       this.flushTiles();
       this.flushPads();
+      if (this.beams) {
+        this.flushRibbons();
+        // Crossing the beam budget either way re-picks the beams.
+        if (this.beamsTrimmed !== this.holders.size > BEAM_BUDGET) this.rebeamAll();
+        else if (Math.abs(this.beams.count - this.beamCountStyled) > this.beamCountStyled * 0.1) this.styleDecks();
+      }
       if (this.labelsDirty) this.updateDistrictLabels();
       this.updateAgentLabels();
       this.layoutPlatformLabels();
+      this.layoutDeckLabels();
       this.layoutDistrictLabels();
       this.layoutWorkerLabels();
       this.keepRouterLabelClear();
     }
     this.tiles.flush();
+    this.workerTiles?.flush();
     this.pads.flush();
 
     this.composer.render();
@@ -2015,6 +2655,11 @@ export class Scene {
     }
     layers.tiles = this.tiles.mesh.visible ? this.tiles.count : 0;
     layers.links = this.links.count;
+    if (this.beams) {
+      layers.beams = this.beams.count;
+      layers.ribbons = this.ribbons.visibleCount;
+      layers['pool tiles'] = this.workerTiles.mesh.visible ? this.workerTiles.count : 0;
+    }
     Object.assign(layers, this.pads.stats());
     layers.effects = this.effects.items.length;
     layers.labels = this.agentLabels.filter((l) => l.visible).length + this.platformLabels.filter((l) => l.visible).length;
@@ -2025,7 +2670,8 @@ export class Scene {
       textures: mem.textures,
       heapMB: performance.memory ? performance.memory.usedJSHeapSize / 2 ** 20 : 0,
       lod: `${this.lod}${this.allShapes ? ' (all shapes)' : ` (budget ${this.budget}, r ${Math.min(this.closeR.value, 9999).toFixed(0)})`}`,
-      quality: `${q.mode} · dpr ${q.dpr.toFixed(2)}${this.bloom.enabled ? '' : ' · no bloom'}`,
+      quality: `${q.mode} · dpr ${q.dpr.toFixed(2)}${this.bloom.enabled ? '' : ' · no bloom'}${q.held ? ' · held' : ''}`,
+      layout: this.layout === 'decks' ? `decks (${this.deckView}${this.beamsTrimmed ? `, beams trimmed to ${BEAM_BUDGET}` : ''})` : 'combined',
       layers,
     };
   }
@@ -2047,13 +2693,15 @@ export class Scene {
     const mode = this.labelMode;
     const byWorker = this.group === 'worker';
     // Obstacles: the agent and district labels just placed (their boxes,
-    // not layout reads).
-    const placed = [...(this.agentBoxes || []), ...(this.districtBoxes || [])];
+    // not layout reads). Decks: the worker deck has its own label budget,
+    // so only its own labels are obstacles.
+    const placed = this.deck ? [...(this.deckBoxes || []), ...(this.deckTitleBoxes || [])] : [...(this.agentBoxes || []), ...(this.districtBoxes || [])];
     const items = [];
     const wp = new THREE.Vector3();
     const fr = this.frustum();
+    const y0 = this.deck?.y || 0;
     for (const [name, p] of this.pads.pads) {
-      wp.set(p.x, 0.2, p.z + 2.6);
+      wp.set(p.x, y0 + 0.2, p.z + 2.6);
       const focused = name === this.focus.worker;
       const card = focused && this.focus.strong;
       const notable = !!p.worker.state && p.worker.state !== 'ACTIVE';
@@ -2086,15 +2734,41 @@ export class Scene {
     this.pads.showLabels(show);
   }
 
-  /** Moves the router's label to the right of its anchor when the events panel would cover it. */
+  /**
+   * Places the router's label after the district labels: centered on its
+   * anchor if that is clear, else above, right, left or below it, whichever
+   * first clears the district and agent labels and the events panel; hidden
+   * when none does (zoomed out, the router sits by the biggest districts'
+   * labels, and those matter more). Sizes are estimated from the text.
+   */
   keepRouterLabelClear() {
     const l = this.router?.labelObj;
     if (!l) return;
+    const W = this.renderer.domElement.clientWidth;
+    const H = this.renderer.domElement.clientHeight;
     const p = l.getWorldPosition(new THREE.Vector3()).project(this.camera);
-    const x = (p.x * 0.5 + 0.5) * this.renderer.domElement.clientWidth;
-    const w = l.element.offsetWidth || 110;
-    const covered = x - w / 2 < (this.leftInset || 0);
-    l.center.set(covered ? 0 : 0.5, 0.5);
+    const x = (p.x * 0.5 + 0.5) * W;
+    const y = (-p.y * 0.5 + 0.5) * H;
+    const w = (l.element.textContent || '').length * 6.4 + 18;
+    const h = 18;
+    const obstacles = [...(this.districtBoxes || []), ...(this.agentBoxes || [])];
+    const inset = this.leftInset || 0;
+    const options = [
+      [0.5, 0.5],
+      [0.5, 1],
+      [0, 0.5],
+      [1, 0.5],
+      [0.5, 0],
+    ];
+    for (const [cx, cy] of options) {
+      const box = { x0: x - w * cx - 3, x1: x + w * (1 - cx) + 3, y0: y - h * cy - 3, y1: y + h * (1 - cy) + 3 };
+      if (box.x0 < inset) continue;
+      if (obstacles.some((b) => box.x0 < b.x1 && box.x1 > b.x0 && box.y0 < b.y1 && box.y1 > b.y0)) continue;
+      l.center.set(cx, cy);
+      l.visible = true;
+      return;
+    }
+    l.visible = false;
   }
 
   /**
@@ -2117,8 +2791,9 @@ export class Scene {
     const maxDist = mode === 'all' ? 60 : closeUp ? 34 : 0;
     const farView = this.lod === 'far';
     const cands = new Set();
-    if (this.selected) cands.add(this.selected);
-    if (mode !== 'off' && !farView) {
+    const deckHidden = this.layout === 'decks' && this.deckA.agents < 0.5;
+    if (this.selected && !deckHidden) cands.add(this.selected);
+    if (mode !== 'off' && !farView && !deckHidden) {
       for (const k of this.labelPinned.keys()) cands.add(k);
       if (maxDist > 0) for (const k of this.allShapes ? this.recs.keys() : this.near) cands.add(k);
     }

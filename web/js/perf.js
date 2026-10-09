@@ -114,6 +114,7 @@ export class PerfOverlay {
       s.heapMB ? `js heap    ${s.heapMB.toFixed(0)} MB` : null,
       `lod        ${s.lod}`,
       `quality    ${s.quality}`,
+      s.layout ? `layout     ${s.layout}` : null,
       `instances`,
       layers,
     ].filter((x) => x !== null);
@@ -133,6 +134,9 @@ export class PerfOverlay {
     this.bench = b;
     this.result.hidden = true;
     const island = { ...sc.island };
+    // Quality stays where it is during the run ('auto' would otherwise
+    // re-size render targets mid-run, a long frame that isn't the scene's).
+    if (sc.quality) sc.quality.held = true;
     sc.setCameraDriver((frame) => {
       const now = performance.now();
       if (!b.last) b.last = now;
@@ -148,6 +152,7 @@ export class PerfOverlay {
       sc.camera.lookAt(sc.controls.target);
       if (b.t >= BENCH_SECONDS) {
         sc.setCameraDriver(null);
+        if (sc.quality) sc.quality.held = false;
         this.bench = null;
         const text = formatSummary(this.benchInfo(), summarize(samples));
         this.showResult(text);

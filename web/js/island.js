@@ -68,7 +68,7 @@ export function clearGroup(group) {
  * into moire. look: the scene's level-of-detail uniforms (uScale, uFarLo,
  * uFarHi); without them the dots always show.
  */
-function dotMaterial(color, size, look = {}) {
+function dotMaterial(color, size, look = {}, fade = null) {
   return new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
@@ -78,6 +78,7 @@ function dotMaterial(color, size, look = {}) {
       uScale: look.uScale || { value: 600 },
       uFarLo: look.uFarLo || { value: 0 },
       uFarHi: look.uFarHi || { value: 0.001 },
+      uFade: fade || { value: 1 },
     },
     vertexShader: `uniform float uSize; uniform float uScale; uniform float uFarLo; uniform float uFarHi; varying float vA;
       void main() {
@@ -91,11 +92,11 @@ function dotMaterial(color, size, look = {}) {
         gl_Position = projectionMatrix * mv;
         if (vA < 0.01) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
       }`,
-    fragmentShader: `uniform vec3 uColor; varying float vA;
+    fragmentShader: `uniform vec3 uColor; uniform float uFade; varying float vA;
       void main() {
         vec2 c = gl_PointCoord * 2.0 - 1.0;
         if (dot(c, c) > 1.0) discard;
-        gl_FragColor = vec4(uColor, vA);
+        gl_FragColor = vec4(uColor, vA * uFade);
       }`,
   });
 }
@@ -113,9 +114,10 @@ export const MAX_PLATFORM_LABELS = 64;
  * @param {THREE.Group} group
  * @param {{width: number, depth: number, districts: Map, frames?: object[], padFrames?: object[], padDepth?: number}} plan
  * @param {object} theme
- * @param {{cluster: string, blending: number, makeLabel: (cls: string) => THREE.Object3D, makeText: (text: string, opts: object) => THREE.Mesh, look?: object}} opts
- * @returns {{width: number, depth: number, cx: number, cz: number, rowZ: number, outline: THREE.Shape}}
- *   the island (center and size) and the z of the worker pad row (atespace view)
+ * @param {{cluster: string, blending: number, makeLabel: (cls: string) => THREE.Object3D, makeText: (text: string, opts: object) => THREE.Mesh, look?: object, glass?: boolean, noPadRow?: boolean, fade?: {value: number}}} opts
+ *   glass: a see-through slab and tiles (the decks layout's agent deck); noPadRow: no room for worker pads at the front
+ * @returns {{width: number, depth: number, cx: number, cz: number, rowZ: number, outline: THREE.Shape, glass: {mat: THREE.Material, opacity: number}[]}}
+ *   the island (center and size), the z of the worker pad row (atespace view) and the glass materials
  */
 export function buildGround(group, plan, theme, opts) {
   clearGroup(group);
@@ -123,7 +125,7 @@ export function buildGround(group, plan, theme, opts) {
   // Room at the front for the worker pad area and the cluster's name; in
   // worker view the pads sit on their platforms, so only the name needs it.
   const ds = [...districts.values()];
-  const padRow = !ds.some((d) => d.kind === 'worker');
+  const padRow = !ds.some((d) => d.kind === 'worker') && !opts.noPadRow;
   const padDepth = plan.padDepth ?? 3;
   const extra = padRow ? 8 + padDepth : 6.5;
   const islandW = width + 9;
@@ -137,10 +139,30 @@ export function buildGround(group, plan, theme, opts) {
   slabGeo.rotateX(Math.PI / 2);
   const light = !theme.glow.additive;
   const blend = opts.blending;
+  // Glass (the decks layout's agent deck): see-through, so the worker deck
+  // below shows; island.glass lists the materials and their opacity for
+  // the deck fade.
+  const glass = !!opts.glass;
+  island.glass = [];
+  // The glass is tinted toward the rim color so it reads as a pane, not a
+  // hole (dark themes' island and sea colors are close).
+  const glassy = (mat, opacity) => {
+    if (!glass) return mat;
+    mat.transparent = true;
+    mat.depthWrite = false;
+    mat.opacity = opacity;
+    if (mat.color && mat.emissive) {
+      mat.color.lerp(new THREE.Color(theme.island.edge), light ? 0.06 : 0.16);
+      mat.emissive.set(theme.island.edge).multiplyScalar(light ? 0 : 0.035);
+    }
+    island.glass.push({ mat, opacity });
+    return mat;
+  };
   const slab = new THREE.Mesh(slabGeo, [
-    new THREE.MeshStandardMaterial({ color: theme.island.fill, roughness: light ? 0.9 : 0.8, metalness: light ? 0 : 0.2 }),
-    new THREE.MeshStandardMaterial({ color: theme.island.side, roughness: light ? 0.9 : 0.8, metalness: light ? 0 : 0.2 }),
+    glassy(new THREE.MeshStandardMaterial({ color: theme.island.fill, roughness: light ? 0.9 : 0.8, metalness: light ? 0 : 0.2 }), light ? 0.55 : 0.5),
+    glassy(new THREE.MeshStandardMaterial({ color: theme.island.side, roughness: light ? 0.9 : 0.8, metalness: light ? 0 : 0.2 }), light ? 0.4 : 0.35),
   ]);
+  if (glass) slab.renderOrder = -1;
   slab.position.set(island.cx, -0.4, island.cz);
   slab.receiveShadow = true;
   group.add(slab);
@@ -148,17 +170,15 @@ export function buildGround(group, plan, theme, opts) {
   // Glowing rim around the top edge.
   const rimPts = shape.getPoints(96).map((p) => new THREE.Vector3(p.x + island.cx, 0.0, p.y + island.cz));
   rimPts.push(rimPts[0].clone());
-  group.add(
-    new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints(rimPts),
-      new THREE.LineBasicMaterial({ color: theme.island.edge, transparent: true, opacity: theme.island.edgeAlpha, blending: blend }),
-    ),
-  );
+  const rimMat = new THREE.LineBasicMaterial({ color: theme.island.edge, transparent: true, opacity: theme.island.edgeAlpha, blending: blend });
+  group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(rimPts), rimMat));
+  if (glass) island.glass.push({ mat: rimMat, opacity: rimMat.opacity });
 
   // Cluster name along the front edge, larger on big islands.
   const nameSize = Math.min(1.5 * Math.max(1, islandW / 160), 8);
   const name = opts.makeText(opts.cluster || 'cluster', { size: nameSize, color: theme.island.label });
   name.material.opacity = 0.75;
+  if (glass) island.glass.push({ mat: name.material, opacity: 0.75 });
   const nameW = name.geometry.parameters?.width ?? 0;
   name.position.set(island.cx - islandW / 2 + 2.4 + nameW / 2, 0.03, island.cz + islandD / 2 - 1.3 - (nameSize - 1.5) / 2);
   group.add(name);
@@ -181,7 +201,7 @@ export function buildGround(group, plan, theme, opts) {
   }
   const tileMesh = new THREE.InstancedMesh(
     new THREE.BoxGeometry(1, 1, 1),
-    new THREE.MeshStandardMaterial({ roughness: light ? 0.9 : 0.7, metalness: light ? 0 : 0.2 }),
+    glassy(new THREE.MeshStandardMaterial({ roughness: light ? 0.9 : 0.7, metalness: light ? 0 : 0.2 }), light ? 0.7 : 0.68),
     Math.max(1, tiles.length),
   );
   tileMesh.count = tiles.length;
@@ -212,7 +232,9 @@ export function buildGround(group, plan, theme, opts) {
   const lineGeo = new THREE.BufferGeometry();
   lineGeo.setAttribute('position', new THREE.BufferAttribute(lp, 3));
   lineGeo.setAttribute('color', new THREE.BufferAttribute(lc, 4));
-  const lines = new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, blending: blend }));
+  const lineMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, blending: blend });
+  if (glass) island.glass.push({ mat: lineMat, opacity: 1 });
+  const lines = new THREE.LineSegments(lineGeo, lineMat);
   lines.frustumCulled = false;
   group.add(lines);
 
@@ -235,7 +257,7 @@ export function buildGround(group, plan, theme, opts) {
     }
     const dotGeo = new THREE.BufferGeometry();
     dotGeo.setAttribute('position', new THREE.BufferAttribute(dots, 3));
-    const pts = new THREE.Points(dotGeo, dotMaterial(theme.district.dots, workerDots ? 0.16 : 0.12, opts.look));
+    const pts = new THREE.Points(dotGeo, dotMaterial(theme.district.dots, workerDots ? 0.16 : 0.12, opts.look, opts.fade));
     pts.frustumCulled = false;
     group.add(pts);
   }
@@ -265,4 +287,84 @@ export function buildGround(group, plan, theme, opts) {
     f.label = label.element;
   }
   return island;
+}
+
+/**
+ * Builds the decks layout's worker deck into group (cleared first; the
+ * scene sets the group's height): an opaque slab under the pads, its rim,
+ * the deck's name along the front edge, and one framed tile per node pool
+ * (when there are several) with a label. The pads themselves are the
+ * scene's WorkerPads. Every material is listed in deck.mats with its
+ * opacity, for the deck fade.
+ * @param {THREE.Group} group
+ * @param {{width: number, depth: number, cx: number, cz: number, frames: object[]}} deck from decks.js planWorkerDeck
+ * @param {object} theme
+ * @param {{blending: number, makeLabel: (cls: string) => THREE.Object3D, makeText: (text: string, opts: object) => THREE.Mesh}} opts
+ * @returns {{width: number, depth: number, cx: number, cz: number, mats: {mat: THREE.Material, opacity: number}[]}}
+ */
+export function buildWorkerDeck(group, deck, theme, opts) {
+  clearGroup(group);
+  const light = !theme.glow.additive;
+  const out = { width: deck.width, depth: deck.depth, cx: deck.cx, cz: deck.cz, mats: [] };
+  const fading = (mat, opacity = 1) => {
+    mat.transparent = opacity < 1;
+    mat.opacity = opacity;
+    out.mats.push({ mat, opacity });
+    return mat;
+  };
+  const shape = roundedRect(deck.width, deck.depth, Math.min(3 + Math.max(deck.width, deck.depth) * 0.004, 7));
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: 1.0, bevelEnabled: true, bevelThickness: 0.3, bevelSize: 0.3, bevelSegments: 2, curveSegments: 10 });
+  geo.rotateX(Math.PI / 2);
+  const fill = new THREE.Color(theme.island.fill).offsetHSL(0, 0, light ? -0.03 : 0.025);
+  const slab = new THREE.Mesh(geo, [
+    fading(new THREE.MeshStandardMaterial({ color: fill, roughness: light ? 0.9 : 0.75, metalness: light ? 0 : 0.25 })),
+    fading(new THREE.MeshStandardMaterial({ color: theme.island.side, roughness: light ? 0.9 : 0.75, metalness: light ? 0 : 0.25 })),
+  ]);
+  slab.position.set(deck.cx, -0.3, deck.cz);
+  slab.receiveShadow = true;
+  group.add(slab);
+  const rim = shape.getPoints(64).map((p) => new THREE.Vector3(p.x + deck.cx, 0.0, p.y + deck.cz));
+  rim.push(rim[0].clone());
+  group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(rim), fading(new THREE.LineBasicMaterial({ color: theme.worker.padEdge, blending: opts.blending }), theme.island.edgeAlpha)));
+  // The deck's name along its front edge.
+  const nameSize = Math.min(1.3 * Math.max(1, deck.width / 120), 6);
+  const name = opts.makeText('workers', { size: nameSize, color: theme.island.label });
+  fading(name.material, 0.6);
+  const nameW = name.geometry.parameters?.width ?? 0;
+  name.position.set(deck.cx - deck.width / 2 + 2 + nameW / 2, 0.03, deck.cz + deck.depth / 2 - 1.1 - (nameSize - 1.3) / 2);
+  group.add(name);
+  // Pool frames: flat tiles with outlines, one instanced mesh.
+  const frames = deck.frames || [];
+  if (frames.length) {
+    const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), fading(new THREE.MeshStandardMaterial({ roughness: light ? 0.9 : 0.7, metalness: light ? 0 : 0.2 })), frames.length);
+    mesh.receiveShadow = true;
+    mesh.frustumCulled = false;
+    const m4 = new THREE.Matrix4();
+    const col = new THREE.Color(theme.district.fill).offsetHSL(0, 0, light ? -0.02 : 0.01);
+    const lp = new Float32Array(frames.length * 8 * 3);
+    frames.forEach((f, i) => {
+      m4.makeScale(f.w, 0.06, f.d).setPosition(f.x + f.w / 2, 0.03, f.z + f.d / 2);
+      mesh.setMatrixAt(i, m4);
+      mesh.setColorAt(i, col);
+      const y = 0.07;
+      const segs = [f.x, f.z, f.x + f.w, f.z, f.x + f.w, f.z, f.x + f.w, f.z + f.d, f.x + f.w, f.z + f.d, f.x, f.z + f.d, f.x, f.z + f.d, f.x, f.z];
+      for (let k = 0; k < 8; k++) lp.set([segs[k * 2], y, segs[k * 2 + 1]], (i * 8 + k) * 3);
+    });
+    group.add(mesh);
+    const lg = new THREE.BufferGeometry();
+    lg.setAttribute('position', new THREE.BufferAttribute(lp, 3));
+    const lines = new THREE.LineSegments(lg, fading(new THREE.LineBasicMaterial({ color: theme.district.edge, blending: opts.blending }), theme.district.edgeAlpha * 0.8));
+    lines.frustumCulled = false;
+    group.add(lines);
+  }
+  for (const f of frames) {
+    f.label = null;
+    const label = opts.makeLabel('district-label');
+    label.element.classList?.add('pool', 'lower');
+    label.position.set(f.x + 0.5, 0.2, f.z + (f.strip ?? 2) / 2);
+    label.center?.set(0, 0.5);
+    group.add(label);
+    f.label = label.element;
+  }
+  return out;
 }

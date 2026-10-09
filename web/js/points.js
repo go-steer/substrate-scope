@@ -115,6 +115,7 @@ const fragment = /* glsl */ `
 uniform float uShape;
 uniform float uAdditive;
 uniform vec3 uDimColor;
+uniform float uFade;
 varying vec3 vColor;
 varying float vA;
 varying float vCls;
@@ -170,7 +171,7 @@ void main() {
   // Composite over the tint.
   vec3 outc = mix(vTint, col, a);
   float outa = max(a, tint);
-  outa *= vA;
+  outa *= vA * uFade;
   if (outa < 0.01) discard;
   gl_FragColor = vec4(outc, outa);
 }`;
@@ -181,8 +182,9 @@ export class PointLayer {
    * @param {THREE.Object3D} parent
    * @param {{value: number}} timeUniform
    * @param {object} look shared uniforms (uScale, uFarLo, uFarHi, uCloseNear, uCloseFar, uAllShapes, uHiDim, uDimColor, uTeam, uTeamSat, uTeamLight, uAdditive)
+   * @param {{fade?: {value: number}}} opts fade: a 0..1 uniform the points' alpha follows (the decks' fade)
    */
-  constructor(parent, timeUniform, look) {
+  constructor(parent, timeUniform, look, opts = {}) {
     this.parent = parent;
     this.capacity = 0;
     this.hwm = 0; // highest index in use + 1 (the draw range)
@@ -197,6 +199,7 @@ export class PointLayer {
       uFocusW: { value: -1 },
       uFocusStrong: { value: 0 },
       ...look,
+      uFade: opts.fade || { value: 1 },
     };
     this.material = new THREE.ShaderMaterial({
       vertexShader: vertex,

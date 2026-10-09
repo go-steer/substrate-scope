@@ -631,6 +631,14 @@ export class Layer {
     return this.attrs.aTeam;
   }
 
+  /** Grows the buffers to hold n shapes now, so they don't grow (several reallocations in one frame) when the camera first comes close. */
+  reserve(n) {
+    if (n <= this.capacity) return;
+    let cap = this.capacity;
+    while (cap < n) cap *= 2;
+    this.allocate(cap);
+  }
+
   add(key) {
     if (this.keys.length >= this.capacity) this.allocate(this.capacity * 2);
     const slot = this.keys.length;
@@ -772,6 +780,11 @@ export class AgentLayers {
         if (x.mesh) x.mesh.visible = on;
       }
     }
+  }
+
+  /** Reserves room per class ({class: shapes}), see Layer.reserve. */
+  reserve(counts) {
+    for (const [cls, n] of Object.entries(counts)) this.layers[cls]?.reserve(n);
   }
 
   /** The meshes picking should test (the agents, not their extras). */

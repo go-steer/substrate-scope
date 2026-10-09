@@ -85,7 +85,8 @@ async function measure(n) {
         const tick = (now) => {
           if (!start) start = last = now;
           const t = (now - start) / 1000;
-          if (now !== last) samples.push({ t: (last - start) / 1000, dt: now - last, calls: info.render.calls, tris: info.render.triangles });
+          // cpu: the scene's main-thread work in the frame (scene.lastCpu, where the build has it).
+          if (now !== last) samples.push({ t: (last - start) / 1000, dt: now - last, cpu: sc.lastCpu || 0, calls: info.render.calls, tris: info.render.triangles });
           info.reset();
           last = now;
           const p = bench.benchPose(Math.min(t, bench.BENCH_SECONDS - 1e-3), island);
@@ -236,7 +237,7 @@ for (const n of sizes) {
   const r = await measure(n);
   all.push(r);
   console.log(`\n${r.n} agents, ${r.workers} workers: load ${(r.loadMs / 1000).toFixed(1)}s, heap ${r.heapMB.toFixed(0)} MB, long tasks ${(r.longTaskMs / 1000).toFixed(1)}s`);
-  console.table(r.rows.map((x) => ({ phase: x.phase, frames: x.frames, fps: x.fps.toFixed(2), avgMs: x.avgMs.toFixed(0), p95Ms: x.p95Ms.toFixed(0), calls: x.calls.toFixed(0), tris: Math.round(x.tris) })));
+  console.table(r.rows.map((x) => ({ phase: x.phase, frames: x.frames, fps: x.fps.toFixed(2), avgMs: x.avgMs.toFixed(0), p95Ms: x.p95Ms.toFixed(0), maxMs: x.maxMs.toFixed(0), cpuMs: x.cpuMs.toFixed(1), calls: x.calls.toFixed(0), tris: Math.round(x.tris) })));
 }
 if (args.json) fs.writeFileSync(args.json, JSON.stringify(all, null, 2));
 await browser.close();

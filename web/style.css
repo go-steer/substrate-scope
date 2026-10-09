@@ -203,8 +203,25 @@ body {
   display: flex;
   gap: 6px;
   flex: 1;
-  justify-content: center;
-  flex-wrap: wrap;
+  justify-content: safe center;
+  /* One row, always: chips shorten (12.3k, then abbreviations) instead of wrapping. */
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chip .ab {
+  display: none;
+}
+
+.chip {
+  white-space: nowrap;
+  flex: none;
+}
+
+/* Decks group by atespace: the grouping toggle only applies to the single island. */
+body.layout-decks #group {
+  display: none;
 }
 
 .chip {
@@ -787,6 +804,33 @@ body.feed-collapsed .feed-tab {
 }
 
 /* --------------------------------------------------------------- labels */
+
+/* Deck names beside each deck (decks layout). */
+.deck-label {
+  pointer-events: none;
+  padding: 4px 10px 5px;
+  border-left: 2px solid var(--accent);
+  text-shadow: var(--label-shadow);
+}
+
+.deck-label .name {
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.deck-label .meta {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* The worker deck's labels sit under the glass: a little quieter. */
+.district-label.lower {
+  opacity: 0.88;
+}
 
 .district-label {
   pointer-events: none;
@@ -1517,6 +1561,17 @@ table.conds .msg {
 
   .labels-btn {
     padding: 6px 8px;
+  }
+}
+
+/* Narrow headers: state names shorten so the chips stay on one row. */
+@media (max-width: 1700px) {
+  .legend .chip .lbl {
+    display: none;
+  }
+
+  .legend .chip .ab {
+    display: inline;
   }
 }
 

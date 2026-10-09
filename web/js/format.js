@@ -60,3 +60,14 @@ export function clock(iso) {
   const d = iso ? new Date(iso) : new Date();
   return d.toLocaleTimeString([], { hour12: false });
 }
+
+/** A count for tight spaces: 9,876 exactly, then 12.3k, 123k, 1.2M. */
+export function compact(n) {
+  const v = Math.round(Number(n) || 0);
+  const a = Math.abs(v);
+  if (a < 10000) return v.toLocaleString('en-US');
+  const unit = a < 999500 ? [1e3, 'k'] : [1e6, 'M'];
+  const x = v / unit[0];
+  const s = Math.abs(x) < 99.95 ? x.toFixed(1) : x.toFixed(0);
+  return `${s.replace(/\.0$/, '')}${unit[1]}`;
+}

@@ -18,12 +18,15 @@
 // droid|box) and is remembered in localStorage. ?extras=0 turns off the
 // agents' idle rings, light pools and particles (also remembered; key x).
 // ?group=worker groups agents by worker instead of atespace (remembered; key g).
+// ?layout=decks|combined: agents and workers on two decks (default), or one
+// island (remembered).
 
 import { ROUTERS, DEFAULT_ROUTER, routerId } from './routers.js';
 import { SHAPES, DEFAULT_SHAPE, shapeById } from './shapes.js';
 import { groupId } from './workers.js';
+import { layoutId } from './decks.js';
 
-const STORE = { router: 'substrate-scope:router', agents: 'substrate-scope:agents', extras: 'substrate-scope:extras', group: 'substrate-scope:group' };
+const STORE = { router: 'substrate-scope:router', agents: 'substrate-scope:agents', extras: 'substrate-scope:extras', group: 'substrate-scope:group', layout: 'substrate-scope:layout' };
 
 function stored(key) {
   try {
@@ -49,7 +52,16 @@ export function initialLooks(search = window.location.search) {
   const ex = params.get('extras') ?? stored(STORE.extras);
   const extras = !(ex === '0' || ex === 'off' || ex === 'false');
   const group = groupId(params.get('group') || stored(STORE.group));
-  return { router, agents, extras, group };
+  const layout = layoutId(params.get('layout') || stored(STORE.layout));
+  return { router, agents, extras, group, layout };
+}
+
+/** Remembers the layout (localStorage and the URL). */
+export function rememberLayout(id) {
+  store(STORE.layout, id);
+  const url = new URL(window.location.href);
+  url.searchParams.set('layout', id);
+  history.replaceState(null, '', url);
 }
 
 /** Remembers the grouping (localStorage and the URL). */

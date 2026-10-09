@@ -66,6 +66,7 @@ uniform vec3 uColors[5];
 uniform vec3 uDimColor;
 uniform float uAdditive;
 uniform float uCell;
+uniform float uFade;
 varying vec2 vUv;
 varying vec4 vFrac;
 varying vec4 vInfo;
@@ -123,7 +124,7 @@ void main() {
   // Lit (focused worker's pool) tiles brighten; non-matching ones dim.
   col = mix(col, col + 0.25, vInfo.z);
   col = mix(uDimColor, col, mix(0.25, 1.0, vInfo.y));
-  float a = inside * far;
+  float a = inside * far * uFade;
   if (a < 0.01) discard;
   gl_FragColor = vec4(col, a);
 }`;
@@ -134,8 +135,11 @@ export class AggregateTiles {
    * @param {THREE.Object3D} parent
    * @param {{value: number}} timeUniform
    * @param {object} look shared uniforms (uScale, uFarLo, uFarHi, uDimColor, uAdditive)
+   * @param {{y?: number, cell?: number, fade?: {value: number}}} opts y: the tiles' height; cell: the
+   *   world size of one unit the level of detail measures (an agent cell, or a worker pad's spacing);
+   *   fade: a 0..1 uniform the tiles' alpha follows (the decks' fade)
    */
-  constructor(parent, timeUniform, look) {
+  constructor(parent, timeUniform, look, opts = {}) {
     this.parent = parent;
     const g = new THREE.PlaneGeometry(1, 1);
     g.rotateX(-Math.PI / 2);
@@ -143,9 +147,11 @@ export class AggregateTiles {
     this.uniforms = {
       uTime: timeUniform,
       uColors: { value: CLASSES.map(() => new THREE.Color(0xffffff)) },
-      uCell: { value: 1.5 },
       ...look,
+      uCell: { value: opts.cell ?? 1.5 },
+      uFade: opts.fade || { value: 1 },
     };
+    this.y = opts.y ?? 0.15;
     this.material = new THREE.ShaderMaterial({
       vertexShader: vertex,
       fragmentShader: fragment,
@@ -197,7 +203,7 @@ export class AggregateTiles {
     const m = new THREE.Matrix4();
     tiles.forEach((t, i) => {
       for (const gname of t.groups) this.index.set(gname, i);
-      m.makeScale(t.w, 1, t.d).setPosition(t.x + t.w / 2, 0.15, t.z + t.d / 2);
+      m.makeScale(t.w, 1, t.d).setPosition(t.x + t.w / 2, this.y, t.z + t.d / 2);
       this.mesh.setMatrixAt(i, m);
       this.attrs.aSize.array[i * 2] = t.w;
       this.attrs.aSize.array[i * 2 + 1] = t.d;

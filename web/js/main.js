@@ -19,15 +19,18 @@ import { Model, CLASSES, CLASS_LABEL, makeFilter, stateClass } from './model.js'
 import { Stream, streamURL } from './stream.js';
 import { Scene, cssColor } from './scene.js';
 import { Panel } from './panel.js';
-import { esc, duration, since, clock, workerLabel } from './format.js';
+import { esc, duration, since, clock, workerLabel, compact } from './format.js';
 import { describe } from './feed.js';
 import { SyntheticStream, syntheticDetail, syntheticOptions } from './synth.js';
 import { ThemePicker } from './theming.js';
-import { LookPicker, initialLooks, rememberGroup } from './looks.js';
+import { LookPicker, initialLooks, rememberGroup, rememberLayout } from './looks.js';
+import { DECK_KEYS, layoutId } from './decks.js';
 import { inkOn } from './themes.js';
 import { PerfOverlay } from './perf.js';
 
 const $ = (sel) => document.querySelector(sel);
+/** Short state names for the header chips on narrower screens. */
+const CLASS_ABBR = { running: 'Run', transition: 'Chg', suspended: 'Susp', crashed: 'Crash', pending: 'Pend' };
 
 const model = new Model();
 const filterState = { atespace: '', classes: new Set(CLASSES), prefix: '' };
@@ -46,8 +49,9 @@ const scene = new Scene(
       hoverWorker = name;
       document.body.style.cursor = name ? 'pointer' : '';
     },
+    onHoverTile: (tile, info) => hoverTile(tile, info),
   },
-  { shape: looks0.agents, router: looks0.router, extras: looks0.extras, group: looks0.group, budget: Number(params.get('budget')) || undefined, quality: params.get('quality') || 'auto' },
+  { shape: looks0.agents, router: looks0.router, extras: looks0.extras, group: looks0.group, layout: looks0.layout, budget: Number(params.get('budget')) || undefined, quality: params.get('quality') || 'auto' },
 );
 let hoverWorker = null;
 // ?synthetic=N replaces the collector with N generated agents (scale checks
@@ -157,6 +161,21 @@ $('#group').addEventListener('click', (e) => {
 });
 setGroup(looks0.group, false);
 
+// Layout: two decks or one island (header toggle, ?layout=; remembered).
+// The decks group by atespace, so the grouping toggle hides there.
+function setLayout(id, remember = true) {
+  scene.setLayout(layoutId(id));
+  document.querySelectorAll('#layout button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.layout === scene.layout)));
+  document.body.classList.toggle('layout-decks', scene.layout === 'decks');
+  document.querySelectorAll('#group button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.group === scene.group)));
+  if (remember) rememberLayout(scene.layout);
+}
+$('#layout').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-layout]');
+  if (b) setLayout(b.dataset.layout);
+});
+setLayout(looks0.layout, false);
+
 function select(key, fly = true) {
   selected = key;
   scene.select(key);
@@ -172,10 +191,28 @@ function select(key, fly = true) {
 }
 
 const tip = $('#tooltip');
+/** A far tile under the pointer (decks): what flows through it. */
+function hoverTile(tile, info) {
+  if (!tile || !info) {
+    if (!hovered) tip.style.display = 'none';
+    return;
+  }
+  const at = scene.hoverAt;
+  if (!at) return;
+  tip.style.display = 'block';
+  tip.style.left = `${at.x + 14}px`;
+  tip.style.top = `${at.y + 14}px`;
+  tip.innerHTML =
+    tile.kind === 'atespace'
+      ? `<div class="t-name">atespace <b>${esc(tile.name)}</b></div><div>${compact(info.total)} agents · ${compact(info.agents)} on workers</div><div class="muted">flowing to ${info.ends} node pool${info.ends === 1 ? '' : 's'}</div>`
+      : `<div class="t-name">node pool <b>${esc(tile.name)}</b></div><div>${compact(info.workers)} workers · ${compact(info.agents)} agents</div><div class="muted">from ${info.ends} atespace${info.ends === 1 ? '' : 's'}</div>`;
+}
+let hovered = null;
 function hover(key, x, y) {
   const a = key && model.agents.get(key);
+  hovered = a ? key : null;
   if (!a) {
-    tip.style.display = 'none';
+    if (!scene.hoverTile) tip.style.display = 'none';
     document.body.style.cursor = hoverWorker ? 'pointer' : '';
     return;
   }
@@ -239,7 +276,7 @@ document.addEventListener('keydown', (e) => {
     scene.pinWorker(null);
     select(null);
   }
-  if (e.key === 'g' && !typing) setGroup(scene.group === 'worker' ? 'atespace' : 'worker');
+  if (e.key === 'g' && !typing && scene.layout !== 'decks') setGroup(scene.group === 'worker' ? 'atespace' : 'worker');
   if (e.key === '/' && !typing) {
     e.preventDefault();
     $('#prefix').focus();
@@ -249,6 +286,8 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'l' && !typing) cycleLabels();
   if (e.key === 'e' && !typing) setFeedCollapsed(!feedCollapsed());
   if (e.key === 'x' && !typing) looks.toggleExtras();
+  // Decks: 1 agent deck only, 2 worker deck only, 3 both.
+  if (DECK_KEYS[e.key] && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) scene.setDeckView(DECK_KEYS[e.key]);
 });
 $('#home').addEventListener('click', () => scene.fitCamera());
 
@@ -267,9 +306,10 @@ function refreshChrome(now = false) {
   }
   $('#cluster').textContent = model.cluster || '';
   const counts = model.counts();
+  // Counts stay short (12.3k) so the header keeps to one row at 100,000 agents.
   $('#legend').innerHTML = CLASSES.map(
-    (c) => `<button class="chip ${c}${filterState.classes.has(c) ? '' : ' off'}" data-cls="${c}" title="Click to toggle, shift-click to show only this">
-      <span class="sw"></span>${CLASS_LABEL[c]}<b>${counts[c]}</b></button>`,
+    (c) => `<button class="chip ${c}${filterState.classes.has(c) ? '' : ' off'}" data-cls="${c}" title="${CLASS_LABEL[c]}: ${counts[c].toLocaleString('en-US')}. Click to toggle, shift-click to show only this">
+      <span class="sw"></span><span class="lbl">${CLASS_LABEL[c]}</span><span class="ab">${CLASS_ABBR[c]}</span><b>${compact(counts[c])}</b></button>`,
   ).join('');
   $('#total').textContent = `${model.agents.size} agents · ${model.atespaces.size} atespaces · ${model.workers.size} workers`;
   const sel = $('#atespace');
@@ -430,6 +470,7 @@ const perf = new PerfOverlay(
     theme: themes.theme?.id || '',
     shape: scene.shape.id,
     group: scene.group,
+    layout: scene.layout,
     lod: scene.stats().lod,
     quality: scene.stats().quality,
   }),
