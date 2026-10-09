@@ -28,6 +28,9 @@ export function rng(seed) {
   };
 }
 
+const WORKERS = 12;
+const workerOf = (r) => `w-${Math.floor(r() * WORKERS)}`;
+
 const WORDS = ['payments', 'checkout', 'search', 'ingest', 'billing', 'triage', 'research', 'support', 'fraud', 'catalog', 'ml-eval', 'ops', 'docs', 'growth', 'risk', 'infra'];
 
 /**
@@ -55,12 +58,58 @@ export function syntheticSnapshot(n, seed = 7) {
         name: `${name.slice(0, 4)}-agent-${String(j).padStart(4, '0')}`,
         state,
         stateSince: new Date(now - r() * 3600e3).toISOString(),
-        task: { phase: state === 'RUNNING' ? 'Running' : 'Suspended' },
+        createTime: new Date(now - 86400e3 - r() * 30 * 86400e3).toISOString(),
+        template: `${name}-runner`,
+        worker: state === 'RUNNING' ? workerOf(r) : undefined,
+        task: syntheticTask(state, now - r() * 3600e3),
       });
     }
     made += count;
   }
-  return { cluster: `synthetic-${n}`, source: 'synthetic', seq: 1, features: {}, sources: [], atespaces, agents, workers: [] };
+  const workers = Array.from({ length: WORKERS }, (_, i) => ({ name: `w-${i}`, pod: `wk-${String(i).padStart(2, '0')}`, state: i === WORKERS - 1 ? 'DRAINING' : 'ACTIVE' }));
+  return { cluster: `synthetic-${n}`, source: 'synthetic', seq: 1, features: { attach: true, mastWeb: true }, sources: [], atespaces, agents, workers };
+}
+
+function syntheticTask(state, at) {
+  const time = new Date(at).toISOString();
+  const ready = {
+    RUNNING: { status: 'True', reason: 'ResumedByRequest' },
+    CRASHED: { status: 'False', reason: 'Crashed', message: 'runner exited with code 137' },
+    RESUMING: { status: 'False', reason: 'Resuming' },
+  }[state] || { status: 'False', reason: 'IdleSuspended', message: 'idle for 10m0s' };
+  return {
+    phase: state === 'RUNNING' ? 'Running' : state === 'CRASHED' ? 'Failed' : 'Suspended',
+    idleSuspendAfter: '10m',
+    image: 'us-docker.pkg.dev/example/agents/runner@sha256:4f9c2a7d1e0b8c6a5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c',
+    httpPort: 8080,
+    workspaces: ['repo'],
+    conditions: [
+      { type: 'Ready', ...ready, lastTransitionTime: time },
+      { type: 'Scheduled', status: 'True', reason: 'Placed', lastTransitionTime: time },
+    ],
+  };
+}
+
+/** The panel's agent detail for a synthetic agent (what the collector's API would say). */
+export function syntheticDetail(a) {
+  if (!a) return null;
+  const r = rng([...a.name].reduce((h, c) => h * 31 + c.charCodeAt(0), 7));
+  const running = a.state === 'RUNNING';
+  const worker = running && a.worker ? { name: a.worker, pod: `wk-${a.worker.slice(2).padStart(2, '0')}` } : null;
+  const agent = {
+    ...a,
+    workerPod: worker?.pod,
+    workerNode: worker && `gke-pool-${Math.floor(r() * 4)}`,
+    snapshotURI: running ? '' : `gs://snapshots/${a.atespace}/${a.name}/0042`,
+    uid: `${Math.floor(r() * 1e8).toString(16)}-synthetic`,
+    crash: a.state === 'CRASHED' ? { message: a.task?.conditions?.[0]?.message || 'synthetic crash', time: a.stateSince } : undefined,
+  };
+  return {
+    agent,
+    worker,
+    runner: running ? { idleSeconds: Math.floor(r() * 420), inFlight: 0 } : null,
+    runnerTime: new Date().toISOString(),
+  };
 }
 
 /** Same interface as Stream, fed by syntheticSnapshot plus random churn. */
@@ -87,7 +136,7 @@ export class SyntheticStream {
       const prev = this.agents.get(key);
       let to = prev.state === 'RUNNING' ? 'SUSPENDED' : 'RUNNING';
       if (this.r() < 0.05) to = 'CRASHED';
-      const agent = { ...prev, state: to, stateSince: now };
+      const agent = { ...prev, state: to, stateSince: now, task: syntheticTask(to, Date.now()), worker: to === 'RUNNING' ? workerOf(this.r) : undefined };
       this.agents.set(key, agent);
       const base = { key, agent, seq: ++this.seq };
       if (to === 'RUNNING') events.push({ ...base, type: 'agent_woke', reason: 'ResumedByRequest' });

@@ -24,6 +24,7 @@
 
 import { esc, duration, since, parseGoDuration, workerLabel, clock } from './format.js';
 import { cssColor } from './scene.js';
+import { stateClass } from './model.js';
 import { apiBase, mastWebURL, sessionLine, emptySessionsNote, attachError } from './sessions.js';
 
 const REASON_CLASS = {
@@ -120,15 +121,20 @@ export class Panel {
     if (!key || this.loadingKey === key) return;
     this.loadingKey = key;
     try {
-      const resp = await fetch(apiBase(key), { cache: 'no-store' });
+      // opts.detail stands in for the collector (synthetic mode).
+      let d = null;
+      if (this.opts.detail) d = this.opts.detail(key);
+      else {
+        const resp = await fetch(apiBase(key), { cache: 'no-store' });
+        if (key !== this.key) return;
+        if (resp.ok) d = await resp.json();
+      }
       if (key !== this.key) return;
-      if (!resp.ok) {
+      if (!d) {
         this.detail = null;
         this.el.innerHTML = `<div class="panel-head"><h2>${esc(key)}</h2><button class="close" data-act="close" title="Close">×</button></div><p class="note">This agent is gone.</p>`;
         return;
       }
-      const d = await resp.json();
-      if (key !== this.key) return;
       const prev = this.detail;
       this.detail = d;
       this.fetchedAt = Date.now();
@@ -178,6 +184,7 @@ export class Panel {
     if (badge) {
       if (badge.textContent !== a.state) badge.textContent = a.state;
       badge.style.setProperty('--c', cssColor(a.state));
+      badge.dataset.cls = stateClass(a.state);
     }
     this.patch('[data-live="age"]', esc(duration(since(a.stateSince))));
     this.patch('[data-live="substrate"]', this.substrateHTML());
@@ -253,7 +260,7 @@ export class Panel {
     parts.push(`<div class="panel-head">
       <div><div class="atespace">${esc(a.atespace)}</div><h2>${esc(a.name)}</h2></div>
       <button class="close" data-act="close" title="Close">×</button></div>
-      <div class="state-line"><span class="state-badge" data-live="state" style="--c:${cssColor(a.state)}">${esc(a.state)}</span>
+      <div class="state-line"><span class="state-badge" data-live="state" data-cls="${stateClass(a.state)}" style="--c:${cssColor(a.state)}">${esc(a.state)}</span>
       <span class="muted">for <span data-live="age">${duration(since(a.stateSince))}</span></span></div>`);
     parts.push(`<section><h3>Agent Substrate</h3><div data-live="substrate">${this.substrateHTML()}</div></section>`);
     if (t) {

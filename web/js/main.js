@@ -21,7 +21,10 @@ import { Scene, cssColor } from './scene.js';
 import { Panel } from './panel.js';
 import { esc, duration, since, clock } from './format.js';
 import { describe } from './feed.js';
-import { SyntheticStream } from './synth.js';
+import { SyntheticStream, syntheticDetail } from './synth.js';
+import { ThemePicker } from './theming.js';
+import { LookPicker, initialLooks } from './looks.js';
+import { inkOn } from './themes.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -31,20 +34,50 @@ let selected = null;
 /** Events seen per type (for tests and screenshot tooling). */
 const eventCounts = {};
 
-const scene = new Scene($('#viewport'), {
-  onPick: (key) => select(key, false),
-  onHover: (key, x, y) => hover(key, x, y),
-});
+const looks0 = initialLooks();
+const scene = new Scene(
+  $('#viewport'),
+  {
+    onPick: (key) => select(key, false),
+    onHover: (key, x, y) => hover(key, x, y),
+  },
+  { shape: looks0.agents, router: looks0.router, extras: looks0.extras },
+);
+// ?synthetic=N replaces the collector with N generated agents (scale checks
+// and design work without a cluster).
+const synthetic = Number(new URLSearchParams(window.location.search).get('synthetic')) || 0;
+scene.setFakeActivity(synthetic > 0);
+
+// Router look and agent shape: switch live, remembered.
+const looks = new LookPicker(
+  { router: $('#router-pick'), agents: $('#agents-pick') },
+  {
+    onRouter: (id) => scene.setRouter(id),
+    onAgents: (id) => scene.setAgentShape(id),
+    onExtras: (on) => scene.setExtras(on),
+  },
+);
+
 const panel = new Panel($('#panel'), {
   onClose: () => select(null),
   features: () => model.features,
+  detail: synthetic > 0 ? (key) => syntheticDetail(model.agents.get(key)) : undefined,
 });
+
+// Themes: switching re-colors the page (CSS variables), the scene, the open
+// panel and the state-colored feed icons.
+const themes = new ThemePicker($('#themes'), (t) => {
+  scene.setTheme(t);
+  if (selected) panel.show(selected);
+  document.querySelectorAll('#feed .item[data-state] .icon').forEach((el) => {
+    const c = cssColor(el.closest('.item').dataset.state);
+    el.style.setProperty('--c', c);
+    el.style.setProperty('--ci', inkOn(c));
+  });
+}, { onTourStep: () => looks.tourStep() });
 
 // ------------------------------------------------------------------ stream
 
-// ?synthetic=N replaces the collector with N generated agents (scale checks
-// without a cluster).
-const synthetic = Number(new URLSearchParams(window.location.search).get('synthetic')) || 0;
 const streamHandlers = {
   onStatus: (s) => {
     const el = $('#conn');
@@ -79,8 +112,7 @@ const streamHandlers = {
     return true;
   },
 };
-if (synthetic > 0) new SyntheticStream(synthetic, streamHandlers);
-else new Stream(streamURL(), streamHandlers);
+const stream = synthetic > 0 ? new SyntheticStream(synthetic, streamHandlers) : new Stream(streamURL(), streamHandlers);
 
 function initialSelection() {
   const m = /[#&]agent=([^&]+)/.exec(window.location.hash);
@@ -174,6 +206,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'h' && !typing) scene.fitCamera();
   if (e.key === 'l' && !typing) cycleLabels();
   if (e.key === 'e' && !typing) setFeedCollapsed(!feedCollapsed());
+  if (e.key === 'x' && !typing) looks.toggleExtras();
 });
 $('#home').addEventListener('click', () => scene.fitCamera());
 
@@ -224,6 +257,14 @@ function setFeedCollapsed(on) {
   }
   if (!on) feedUnread = 0;
   updateFeedCounts();
+  scene.setLeftInset(feedInset());
+}
+
+/** Width the open events panel covers, for framing the island beside it. */
+function feedInset() {
+  if (feedCollapsed()) return 0;
+  const r = $('#feedpanel').getBoundingClientRect();
+  return r.right + 12;
 }
 
 function updateFeedCounts() {
@@ -237,7 +278,8 @@ function feed(item) {
   div.className = `item ${type}`;
   const now = new Date();
   const color = type === 'state' && item.state ? cssColor(item.state) : '';
-  div.innerHTML = `<span class="icon"${color ? ` style="--c:${color}"` : ''}>${FEED_ICON[type]}</span>
+  if (color) div.dataset.state = item.state;
+  div.innerHTML = `<span class="icon"${color ? ` style="--c:${color};--ci:${inkOn(color)}"` : ''}>${FEED_ICON[type]}</span>
     <span class="body"><span class="txt">${item.text}</span><span class="ts" title="${esc(now.toLocaleString())}">${clock(now.toISOString())}</span></span>`;
   if (item.key) {
     div.classList.add('link');
@@ -255,6 +297,7 @@ function feed(item) {
   updateFeedCounts();
 }
 
+scene.setLeftInset(feedInset());
 $('#feed-collapse').addEventListener('click', () => setFeedCollapsed(true));
 $('#feed-tab').addEventListener('click', () => setFeedCollapsed(false));
 try {
@@ -292,4 +335,4 @@ setInterval(() => {
 }, 1000);
 
 // For debugging and screenshots.
-window.scope = { model, scene, panel, select, stateClass, eventCounts };
+window.scope = { model, scene, panel, select, stateClass, eventCounts, themes, looks, stream };

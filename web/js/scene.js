@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // The 3D scene: the cluster island, atespace districts, agents (one
-// InstancedMesh per visual class), worker pads, the router tower, and the
-// short animations that show events.
+// InstancedMesh per visual class, in a switchable shape), worker pads, the
+// router (in a switchable look), and the short animations that show events.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -25,219 +25,41 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 
 import { CLASSES, stateClass } from './model.js';
+import { AgentLayers } from './agents.js';
+import { shapeById } from './shapes.js';
+import { buildRouter, routerId } from './routers.js';
 import { planIsland, slotPosition, SlotTable } from './layout.js';
 import { esc, duration, since, workerLabel } from './format.js';
 import { Effects } from './effects.js';
+import { themeById, classColor, hex } from './themes.js';
 
-/** Base color per visual class; some states tint their class. */
-const CLASS_COLOR = {
-  running: 0x2ee6c5,
-  transition: 0xffb547,
-  suspended: 0x52679a,
-  crashed: 0xff3b5c,
-  pending: 0x9fb2d9,
-};
-const STATE_COLOR = {
-  RESUMING: 0xffd36b,
-  SUSPENDING: 0xff9a3d,
-  PAUSED: 0x6a5aa8,
-  PAUSING: 0xb48cff,
-  DELETING: 0x8a8f99,
-  REVERTING: 0xff7ab8,
-};
-/** Height of an agent's column per class. */
-const CLASS_HEIGHT = { running: 1.9, transition: 1.0, suspended: 0.16, crashed: 1.1, pending: 0.7 };
-/** Look of each class in the agent shader. */
-const CLASS_LOOK = {
-  running: { breath: 1, pulse: 0, outline: 0, emissive: 0.75, base: 1.0, speed: 1.4 },
-  transition: { breath: 1, pulse: 0, outline: 0, emissive: 0.9, base: 1.0, speed: 6.0 },
-  suspended: { breath: 0, pulse: 0, outline: 0, emissive: 0.14, base: 0.75, speed: 0 },
-  crashed: { breath: 0, pulse: 1, outline: 0, emissive: 0.55, base: 1.0, speed: 5.0 },
-  pending: { breath: 0.4, pulse: 0, outline: 1, emissive: 0.7, base: 1.0, speed: 1.0 },
-};
-
+// The active theme (see themes.js). Every state shares its class color: the
+// five class colors of a theme are validated as a set.
+let theme = themeById();
 export function stateColor(state) {
-  return STATE_COLOR[state] ?? CLASS_COLOR[stateClass(state)];
+  return hex(cssColor(state));
 }
 export function cssColor(state) {
-  return `#${stateColor(state).toString(16).padStart(6, '0')}`;
+  return classColor(theme, stateClass(state));
 }
 
-const AGENT_FOOT = 0.92;
+const TONE_MAPPING = { none: THREE.NoToneMapping, neutral: THREE.NeutralToneMapping, aces: THREE.ACESFilmicToneMapping, agx: THREE.AgXToneMapping };
 
-const agentVertex = /* glsl */ `
-attribute float aSeed;
-attribute float aDim;
-attribute float aFlash;
-uniform float uTime;
-varying vec3 vNormal;
-varying vec3 vColor;
-varying vec2 vUv;
-varying float vY;
-varying float vDim;
-varying float vFlash;
-varying float vSeed;
-void main() {
-  mat4 m = modelMatrix * instanceMatrix;
-  vec4 wp = m * vec4(position, 1.0);
-  vNormal = normalize(mat3(m) * normal);
-  #ifdef USE_INSTANCING_COLOR
-    vColor = instanceColor;
-  #else
-    vColor = vec3(1.0);
-  #endif
-  vUv = uv;
-  vY = position.y;
-  vDim = aDim;
-  float age = uTime - aFlash;
-  vFlash = (aFlash > 0.0 && age >= 0.0) ? exp(-age * 1.6) : 0.0;
-  vSeed = aSeed;
-  gl_Position = projectionMatrix * viewMatrix * wp;
-}`;
-
-const agentFragment = /* glsl */ `
-uniform float uTime;
-uniform float uBreath;
-uniform float uPulse;
-uniform float uOutline;
-uniform float uEmissive;
-uniform float uBase;
-uniform float uSpeed;
-varying vec3 vNormal;
-varying vec3 vColor;
-varying vec2 vUv;
-varying float vY;
-varying float vDim;
-varying float vFlash;
-varying float vSeed;
-void main() {
-  float edge = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
-  if (uOutline > 0.5 && edge > 0.08) discard;
-  vec3 n = normalize(vNormal);
-  vec3 L = normalize(vec3(0.35, 1.0, 0.45));
-  float diff = max(dot(n, L), 0.0);
-  float hemi = 0.5 + 0.5 * n.y;
-  vec3 base = vColor * (0.10 + 0.45 * diff + 0.22 * hemi) * uBase;
-  float wave = 0.5 + 0.5 * sin(uTime * uSpeed + vSeed * 6.2831);
-  float breath = mix(1.0, 0.55 + 0.45 * wave, uBreath);
-  float pulse = uPulse * pow(wave, 4.0);
-  float top = smoothstep(0.45, 1.0, vY) * step(0.5, 1.0 - abs(n.y - 1.0)) + 0.35 * smoothstep(0.2, 1.0, vY);
-  vec3 glow = vColor * uEmissive * (0.25 + 0.9 * top) * breath;
-  glow += vColor * (pulse * 1.6 + vFlash * 1.6);
-  float rim = smoothstep(0.07, 0.0, edge);
-  glow += vColor * rim * (0.12 + uEmissive * 0.8);
-  vec3 col = base + glow;
-  col = mix(col, col * 0.08 + vec3(0.012, 0.016, 0.03), vDim);
-  gl_FragColor = vec4(col, 1.0);
-}`;
-
-/** One InstancedMesh per visual class, with slots that can be added and removed. */
-class Layer {
-  constructor(cls, parent, geometry, timeUniform) {
-    this.cls = cls;
-    this.parent = parent;
-    this.geometry = geometry;
-    const look = CLASS_LOOK[cls];
-    this.material = new THREE.ShaderMaterial({
-      vertexShader: agentVertex,
-      fragmentShader: agentFragment,
-      side: look.outline ? THREE.DoubleSide : THREE.FrontSide,
-      uniforms: {
-        uTime: timeUniform,
-        uBreath: { value: look.breath },
-        uPulse: { value: look.pulse },
-        uOutline: { value: look.outline },
-        uEmissive: { value: look.emissive },
-        uBase: { value: look.base },
-        uSpeed: { value: look.speed },
-      },
-    });
-    this.keys = [];
-    this.capacity = 0;
-    this.mesh = null;
-    this.dirty = false;
-    this.allocate(64);
-  }
-
-  allocate(cap) {
-    const old = this.mesh;
-    const mesh = new THREE.InstancedMesh(this.geometry, this.material, cap);
-    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
-    const attr = (name) => {
-      const a = new THREE.InstancedBufferAttribute(new Float32Array(cap), 1);
-      a.setUsage(THREE.DynamicDrawUsage);
-      this.geometry.setAttribute(name, a);
-      return a;
-    };
-    // Each class has its own geometry clone so the per-instance attributes
-    // don't collide between layers.
-    const seed = attr('aSeed');
-    const dim = attr('aDim');
-    const flash = attr('aFlash');
-    if (old) {
-      mesh.instanceMatrix.array.set(old.instanceMatrix.array.subarray(0, this.capacity * 16));
-      mesh.instanceColor.array.set(old.instanceColor.array.subarray(0, this.capacity * 3));
-      seed.array.set(this.seed.array.subarray(0, this.capacity));
-      dim.array.set(this.dim.array.subarray(0, this.capacity));
-      flash.array.set(this.flash.array.subarray(0, this.capacity));
-      this.parent.remove(old);
-      old.dispose();
-    }
-    this.seed = seed;
-    this.dim = dim;
-    this.flash = flash;
-    mesh.count = this.keys.length;
-    mesh.frustumCulled = false;
-    mesh.userData.layer = this;
-    this.mesh = mesh;
-    this.capacity = cap;
-    this.parent.add(mesh);
-    this.markDirty();
-  }
-
-  add(key) {
-    if (this.keys.length >= this.capacity) this.allocate(this.capacity * 2);
-    const slot = this.keys.length;
-    this.keys.push(key);
-    this.mesh.count = this.keys.length;
-    this.markDirty();
-    return slot;
-  }
-
-  /** Removes a slot by moving the last one into it. Returns the moved key. */
-  remove(slot) {
-    const last = this.keys.length - 1;
-    let moved = null;
-    if (slot !== last) {
-      moved = this.keys[last];
-      this.keys[slot] = moved;
-      this.mesh.instanceMatrix.array.copyWithin(slot * 16, last * 16, last * 16 + 16);
-      this.mesh.instanceColor.array.copyWithin(slot * 3, last * 3, last * 3 + 3);
-      this.seed.array[slot] = this.seed.array[last];
-      this.dim.array[slot] = this.dim.array[last];
-      this.flash.array[slot] = this.flash.array[last];
-    }
-    this.keys.pop();
-    this.mesh.count = this.keys.length;
-    this.markDirty();
-    return moved;
-  }
-
-  markDirty() {
-    this.dirty = true;
-  }
-
-  flush() {
-    if (!this.dirty) return;
-    this.dirty = false;
-    this.mesh.instanceMatrix.needsUpdate = true;
-    this.mesh.instanceColor.needsUpdate = true;
-    this.seed.needsUpdate = true;
-    this.dim.needsUpdate = true;
-    this.flash.needsUpdate = true;
-    if (this.keys.length) this.mesh.computeBoundingSphere();
-  }
+/** A vertical gradient for the scene background. */
+function gradientTexture(top, bottom) {
+  const c = document.createElement('canvas');
+  c.width = 4;
+  c.height = 256;
+  const ctx = c.getContext('2d');
+  const g = ctx.createLinearGradient(0, 0, 0, 256);
+  g.addColorStop(0, top);
+  g.addColorStop(0.65, bottom);
+  g.addColorStop(1, bottom);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 4, 256);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }
 
 function hashString(s) {
@@ -297,13 +119,16 @@ function textPlane(text, { size = 3, color = '#7f93bd', weight = 700, letterSpac
 const CHANGE_LABEL_SECONDS = 6;
 // Camera-to-target distance under which 'auto' labels every nearby agent.
 const CLOSE_UP_DISTANCE = 20;
+// Camera-to-pad distance under which worker pads show their labels.
+const WORKER_LABEL_DISTANCE = 34;
 
 export class Scene {
   /**
    * @param {HTMLElement} container
    * @param {{onPick?: Function, onHover?: Function}} handlers
+   * @param {{shape?: string, router?: string, extras?: boolean}} opts initial agent shape, router look, extras
    */
-  constructor(container, handlers = {}) {
+  constructor(container, handlers = {}, opts = {}) {
     this.container = container;
     this.handlers = handlers;
     this.time = { value: 0 };
@@ -320,12 +145,21 @@ export class Scene {
     this.model = null;
     // ?slowmo=N plays animations N times slower (for recording demos and
     // for screenshots with a software renderer).
-    this.slowmo = Math.max(1, Number(new URLSearchParams(window.location.search).get('slowmo')) || 1);
+    const params = new URLSearchParams(window.location.search);
+    this.slowmo = Math.max(1, Number(params.get('slowmo')) || 1);
+    // The agents' shape and the router's look (see shapes.js, routers.js);
+    // main.js sets the remembered choice before the first snapshot.
+    this.shape = shapeById(opts.shape);
+    this.routerKind = routerId(opts.router);
+    this.router = null;
+    this.extras = opts.extras !== false;
+    // 1 in synthetic mode: idle rings run on fake timers and a random
+    // subset of running agents "serves requests".
+    this.fake = { value: 0 };
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     container.appendChild(renderer.domElement);
     this.renderer = renderer;
 
@@ -335,8 +169,7 @@ export class Scene {
     this.labelRenderer = labels;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x05080f);
-    scene.fog = new THREE.FogExp2(0x05080f, 0.006);
+    scene.fog = new THREE.FogExp2(0x000000, 0.006);
     this.scene = scene;
 
     const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 2000);
@@ -352,10 +185,32 @@ export class Scene {
     controls.screenSpacePanning = false;
     this.controls = controls;
 
-    scene.add(new THREE.HemisphereLight(0x8fb0ff, 0x0a0d18, 0.9));
-    const sun = new THREE.DirectionalLight(0xdfe8ff, 1.4);
+    this.ambient = new THREE.AmbientLight(0xffffff, 0);
+    scene.add(this.ambient);
+    this.hemi = new THREE.HemisphereLight(0xffffff, 0x000000, 1);
+    scene.add(this.hemi);
+    const sun = new THREE.DirectionalLight(0xffffff, 1);
     sun.position.set(30, 60, 25);
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.radius = 6;
+    sun.shadow.bias = -0.0005;
+    sun.shadow.normalBias = 0.02;
     scene.add(sun);
+    scene.add(sun.target);
+    this.sun = sun;
+
+    // Shared agent-shader uniforms the theme sets.
+    this.look = {
+      uGlow: { value: 1 },
+      uAmb: { value: 0.1 },
+      uDiff: { value: 0.45 },
+      uHemi: { value: 0.22 },
+      uGloss: { value: 0 },
+      uInk: { value: 0 },
+      uOcc: { value: 0 },
+      uAdditive: { value: 1 },
+      uDimColor: { value: new THREE.Color() },
+    };
 
     this.world = new THREE.Group();
     scene.add(this.world);
@@ -364,10 +219,7 @@ export class Scene {
     this.agentGroup = new THREE.Group();
     this.world.add(this.agentGroup);
 
-    const geo = new THREE.BoxGeometry(AGENT_FOOT, 1, AGENT_FOOT);
-    geo.translate(0, 0.5, 0);
-    this.layers = {};
-    for (const cls of CLASSES) this.layers[cls] = new Layer(cls, this.agentGroup, geo.clone(), this.time);
+    this.buildAgents();
 
     this.effects = new Effects(this.world, this.time);
     this.addBackdrop();
@@ -376,7 +228,7 @@ export class Scene {
     // Worker lines: one LineSegments rebuilt when assignments change.
     this.workerLines = new THREE.LineSegments(
       new THREE.BufferGeometry(),
-      new THREE.LineBasicMaterial({ color: 0x2ee6c5, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false }),
+      new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.22, depthWrite: false }),
     );
     this.workerLines.frustumCulled = false;
     this.world.add(this.workerLines);
@@ -388,6 +240,7 @@ export class Scene {
     composer.addPass(this.bloom);
     composer.addPass(new OutputPass());
     this.composer = composer;
+    this.setTheme(theme);
 
     // Agent label pool.
     this.agentLabels = [];
@@ -420,22 +273,28 @@ export class Scene {
       new THREE.ShaderMaterial({
         transparent: true,
         depthWrite: false,
-        uniforms: { uTime: this.time },
+        uniforms: {
+          uGrid: { value: new THREE.Color() },
+          uGridA: { value: 0.2 },
+          uSea: { value: new THREE.Color() },
+          uSeaA: { value: 0.9 },
+        },
         vertexShader: `varying vec3 vP; void main(){ vec4 w = modelMatrix*vec4(position,1.0); vP = w.xyz; gl_Position = projectionMatrix*viewMatrix*w; }`,
-        fragmentShader: `varying vec3 vP; uniform float uTime;
+        fragmentShader: `varying vec3 vP; uniform vec3 uGrid; uniform float uGridA; uniform vec3 uSea; uniform float uSeaA;
           void main(){
             vec2 g = abs(fract(vP.xz / 4.0 - 0.5) - 0.5) / fwidth(vP.xz / 4.0);
             float line = 1.0 - min(min(g.x, g.y), 1.0);
             float d = length(vP.xz);
             float fade = exp(-d * 0.018);
-            vec3 c = vec3(0.08, 0.14, 0.26) * line * fade * 0.35 + vec3(0.015,0.03,0.06) * fade;
-            gl_FragColor = vec4(c, fade * 0.9);
+            vec3 c = mix(uSea, uGrid, line * uGridA);
+            gl_FragColor = vec4(c, fade * uSeaA);
           }`,
       }),
     );
     sea.rotation.x = -Math.PI / 2;
     sea.position.y = -1.6;
     this.scene.add(sea);
+    this.sea = sea;
 
     // Stars.
     const n = 1400;
@@ -451,19 +310,20 @@ export class Scene {
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    const stars = new THREE.Points(g, new THREE.PointsMaterial({ color: 0x6f86b8, size: 1.6, sizeAttenuation: false, transparent: true, opacity: 0.55, fog: false }));
+    const stars = new THREE.Points(g, new THREE.PointsMaterial({ color: 0xffffff, size: 1.6, sizeAttenuation: false, transparent: true, opacity: 0.55, fog: false }));
     this.scene.add(stars);
+    this.stars = stars;
   }
 
   addSelectionMarker() {
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(0.85, 1.0, 48),
-      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide }),
     );
     ring.rotation.x = -Math.PI / 2;
     const beam = new THREE.Mesh(
       new THREE.CylinderGeometry(0.04, 0.04, 1, 8, 1, true),
-      new THREE.MeshBasicMaterial({ color: 0xbfe9ff, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false }),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, depthWrite: false }),
     );
     const marker = new THREE.Group();
     marker.add(ring);
@@ -474,7 +334,7 @@ export class Scene {
 
     const hover = new THREE.Mesh(
       new THREE.RingGeometry(0.75, 0.85, 40),
-      new THREE.MeshBasicMaterial({ color: 0x9fd8ff, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6, depthWrite: false, side: THREE.DoubleSide }),
     );
     hover.rotation.x = -Math.PI / 2;
     hover.visible = false;
@@ -493,17 +353,157 @@ export class Scene {
     this.camera.updateProjectionMatrix();
   }
 
+  // ---------------------------------------------------------------- theme
+
+  /** The blending for glowing lines and effects: additive only on dark themes. */
+  get blending() {
+    return theme.glow.additive ? THREE.AdditiveBlending : THREE.NormalBlending;
+  }
+
+  /** Applies a theme (see themes.js) without rebuilding the page. */
+  setTheme(t) {
+    theme = t;
+    const sc = t.scene;
+    this.scene.background?.dispose?.();
+    this.scene.background = gradientTexture(sc.backgroundTop, sc.background);
+    this.scene.fog.color.set(sc.fog);
+    this.scene.fog.density = sc.fogDensity;
+    const su = this.sea.material.uniforms;
+    su.uGrid.value.set(sc.grid);
+    su.uGridA.value = sc.gridAlpha;
+    su.uSea.value.set(sc.sea);
+    su.uSeaA.value = sc.seaAlpha;
+    this.stars.visible = !!sc.stars;
+    if (sc.stars) {
+      this.stars.material.color.set(sc.stars);
+      this.stars.material.opacity = sc.starAlpha;
+    }
+
+    const L = t.light;
+    this.renderer.toneMapping = TONE_MAPPING[L.toneMapping] ?? THREE.NeutralToneMapping;
+    this.renderer.toneMappingExposure = L.exposure;
+    this.ambient.color.set(L.ambient);
+    this.ambient.intensity = L.ambientIntensity;
+    this.hemi.color.set(L.hemiSky);
+    this.hemi.groundColor.set(L.hemiGround);
+    this.hemi.intensity = L.hemiIntensity;
+    this.sun.color.set(L.sun);
+    this.sun.intensity = L.sunIntensity;
+    this.sun.castShadow = L.shadow;
+    this.sun.shadow.intensity = L.shadowAlpha;
+    this.renderer.shadowMap.enabled = L.shadow;
+
+    const g = t.glow;
+    this.look.uGlow.value = g.emissive;
+    this.look.uAmb.value = g.ambient;
+    this.look.uDiff.value = g.diffuse;
+    this.look.uHemi.value = g.hemi;
+    this.look.uGloss.value = g.gloss;
+    this.look.uInk.value = g.ink;
+    this.look.uOcc.value = g.occlusion;
+    this.look.uAdditive.value = g.additive ? 1 : 0;
+    this.look.uDimColor.value.set(sc.background);
+    // Light themes draw every class at full strength (their suspended color
+    // is already pale) and blend the extras normally.
+    this.agents.setTheme(t);
+
+    this.bloom.enabled = t.bloom.strength > 0;
+    this.bloom.strength = t.bloom.strength;
+    this.bloom.radius = t.bloom.radius;
+    this.bloom.threshold = t.bloom.threshold;
+
+    const blend = this.blending;
+    this.workerLines.material.color.set(t.links.color);
+    this.workerLines.material.blending = blend;
+    this.marker.ring.material.color.set(t.marker.select);
+    this.marker.beam.material.color.set(t.marker.select);
+    this.hoverRing.material.color.set(t.marker.hover);
+    for (const m of [this.marker.ring.material, this.marker.beam.material, this.hoverRing.material]) m.blending = blend;
+    this.effects.blending = blend;
+
+    // Shadows and blending changes need recompiled materials.
+    this.scene.traverse((o) => {
+      for (const m of [o.material].flat()) if (m) m.needsUpdate = true;
+    });
+    // Rebuild the island and recolor every agent.
+    if (this.model) this.replan(false);
+  }
+
+  // --------------------------------------------------------------- shapes
+
+  /** Builds the agent layers for the current shape. */
+  buildAgents() {
+    this.agents = new AgentLayers(this.agentGroup, this.shape, this.time, this.look, { fake: this.fake });
+    this.layers = this.agents.layers;
+    this.agents.setExtras(this.extras);
+  }
+
+  /** Switches the agents' shape live: the old layers are disposed. */
+  setAgentShape(id) {
+    const shape = shapeById(id);
+    if (shape === this.shape) return;
+    this.shape = shape;
+    this.agents.dispose();
+    this.buildAgents();
+    this.agents.setTheme(theme);
+    this.anims.clear();
+    for (const rec of this.recs.values()) {
+      const pose = shape.pose[rec.cls];
+      rec.h = pose.h;
+      rec.tip = pose.tip;
+      this.attach(rec);
+    }
+    this.rebuildWorkerLines();
+    this.updateMarker();
+  }
+
+  /** Switches the router's look live. */
+  setRouter(id) {
+    const kind = routerId(id);
+    if (kind === this.routerKind && this.router) return;
+    this.routerKind = kind;
+    if (this.island) this.buildRouter();
+  }
+
+  /** Turns the agents' extras (idle rings, light pools, particles) on or off. */
+  setExtras(on) {
+    this.extras = on;
+    this.agents.setExtras(on);
+  }
+
+  /** Synthetic mode: fake idle timers and request serving. */
+  setFakeActivity(on) {
+    this.fake.value = on ? 1 : 0;
+  }
+
+  buildRouter() {
+    this.router?.dispose();
+    this.router = buildRouter(this.routerKind, {
+      theme,
+      blending: this.blending,
+      island: this.island,
+      time: this.time,
+      makeLabel: (text) => {
+        const div = document.createElement('div');
+        div.className = 'tower-label';
+        div.textContent = text;
+        return new CSS2DObject(div);
+      },
+    });
+    this.islandGroup.add(this.router.group);
+  }
+
+  /** World height of an agent's top (labels, arcs, the marker). */
+  topOf(rec) {
+    return this.shape.top(rec.h, rec.tip);
+  }
+
   // ---------------------------------------------------------------- data
 
   /** Rebuilds everything from the model (after a snapshot or a re-plan). */
   setModel(model) {
     this.model = model;
-    for (const cls of CLASSES) {
-      const layer = this.layers[cls];
-      layer.keys.length = 0;
-      layer.mesh.count = 0;
-      layer.markDirty();
-    }
+    for (const cls of CLASSES) this.layers[cls].clear();
     this.recs.clear();
     this.anims.clear();
     this.replan(true);
@@ -522,15 +522,12 @@ export class Scene {
 
     const keys = [...model.agents.keys()].sort();
     const existing = new Map(this.recs);
-    for (const cls of CLASSES) {
-      this.layers[cls].keys.length = 0;
-      this.layers[cls].mesh.count = 0;
-    }
+    for (const cls of CLASSES) this.layers[cls].clear();
     this.recs.clear();
     for (const key of keys) {
       const a = model.agents.get(key);
       const old = existing.get(key);
-      this.place(key, a, old ? old.h : undefined);
+      this.place(key, a, old);
     }
     this.applyFilter();
     this.rebuildWorkers();
@@ -538,7 +535,8 @@ export class Scene {
     if (fit || firstPlan) this.fitCamera();
   }
 
-  place(key, a, h) {
+  /** Places an agent; from: an earlier pose to keep (else its class's pose). */
+  place(key, a, from) {
     const table = this.slots.get(a.atespace);
     if (!table) return false;
     const slot = table.assign(key);
@@ -546,8 +544,8 @@ export class Scene {
     const district = this.plan.districts.get(a.atespace);
     const p = slotPosition(district, slot);
     const cls = stateClass(a.state);
-    const target = CLASS_HEIGHT[cls];
-    const rec = { key, agent: a, cls, slot: -1, x: p.x, z: p.z, h: h ?? target, seed: hashString(key) };
+    const pose = this.shape.pose[cls];
+    const rec = { key, agent: a, cls, slot: -1, x: p.x, z: p.z, h: from?.h ?? pose.h, tip: from?.tip ?? pose.tip, seed: hashString(key) };
     this.recs.set(key, rec);
     this.attach(rec);
     return true;
@@ -559,6 +557,7 @@ export class Scene {
     layer.seed.array[rec.slot] = rec.seed;
     layer.dim.array[rec.slot] = this.filter(rec.agent) ? 0 : 1;
     layer.flash.array[rec.slot] = 0;
+    this.writeActivity(rec);
     const c = new THREE.Color(stateColor(rec.agent.state));
     layer.mesh.instanceColor.setXYZ(rec.slot, c.r, c.g, c.b);
     this.writeMatrix(rec);
@@ -573,14 +572,26 @@ export class Scene {
 
   writeMatrix(rec) {
     const layer = this.layers[rec.cls];
-    const m = layer.mesh.instanceMatrix.array;
-    const o = rec.slot * 16;
-    const h = Math.max(rec.h, 0.02);
-    m[o] = 1; m[o + 1] = 0; m[o + 2] = 0; m[o + 3] = 0;
-    m[o + 4] = 0; m[o + 5] = h; m[o + 6] = 0; m[o + 7] = 0;
-    m[o + 8] = 0; m[o + 9] = 0; m[o + 10] = 1; m[o + 11] = 0;
-    m[o + 12] = rec.x; m[o + 13] = 0.12; m[o + 14] = rec.z; m[o + 15] = 1;
+    this.shape.matrix(layer.mesh.instanceMatrix.array, rec.slot * 16, rec.x, rec.z, rec.h, rec.tip);
     layer.markDirty();
+  }
+
+  /**
+   * Idle progress (1 = just served, 0 = about to suspend; -1 = unknown) and
+   * whether the agent is serving a request. The collector doesn't stream
+   * either yet, so real agents show neither; synthetic mode fakes both (the
+   * shader runs the fake idle timer from aIdle as a phase).
+   */
+  writeActivity(rec) {
+    const layer = this.layers[rec.cls];
+    const fake = this.fake.value > 0;
+    const a = rec.agent;
+    let idle = -1;
+    if (fake) idle = (rec.seed * 7.31) % 1;
+    else if (typeof a.idleProgress === 'number') idle = a.idleProgress;
+    layer.attrs.aIdle.array[rec.slot] = idle;
+    const serving = fake ? (rec.seed * 13.7) % 1 < 0.22 : (a.inFlight || 0) > 0;
+    layer.attrs.aServe.array[rec.slot] = serving ? 1 : 0;
   }
 
   /** Applies a batch of events that the model has already absorbed. */
@@ -608,7 +619,7 @@ export class Scene {
       if (ev.type === 'agent_removed') {
         const rec = this.recs.get(key);
         if (rec) {
-          this.effects.ripple(rec.x, rec.z, 0x8090b0, 1.2);
+          this.effects.ripple(rec.x, rec.z, theme.effects.removed, 1.2);
           this.detach(rec);
           this.recs.delete(key);
           this.slots.get(rec.agent.atespace)?.release(key);
@@ -618,13 +629,16 @@ export class Scene {
       }
       let rec = this.recs.get(key);
       if (!rec) {
-        if (!this.slots.has(ev.agent.atespace) || !this.place(key, ev.agent, 0.01)) {
+        if (!this.slots.has(ev.agent.atespace) || !this.place(key, ev.agent)) {
           replan = true;
           continue;
         }
         rec = this.recs.get(key);
-        this.animateHeight(rec, CLASS_HEIGHT[rec.cls], 1.2);
-        if (ev.agent.task) this.effects.beam(rec.x, rec.z, stateColor(ev.agent.state));
+        rec.h = 0;
+        rec.tip = 0;
+        this.writeMatrix(rec);
+        this.animatePose(rec, 1.2);
+        if (ev.agent.task) this.effects.beam(rec.x, rec.z, theme.effects.beam);
         this.pinLabel(key, CHANGE_LABEL_SECONDS);
         workersChanged = true;
         continue;
@@ -634,26 +648,30 @@ export class Scene {
       if (prevState !== ev.agent.state) this.restyle(rec);
       switch (ev.type) {
         case 'agent_woke': {
-          const top = new THREE.Vector3(rec.x, rec.h + 0.2, rec.z);
-          this.effects.arc(this.towerTop, top, 0x7fe8ff, () => {
+          // Aim at the agent's running pose: it lifts while the arc flies.
+          const pose = this.shape.pose.running;
+          const top = new THREE.Vector3(rec.x, this.shape.top(pose.h, pose.tip) + 0.2, rec.z);
+          const from = this.router.wake(top, now);
+          const arrive = () => {
             this.flash(rec.key);
-            this.effects.ripple(rec.x, rec.z, 0x2ee6c5, 1.4);
-          });
-          this.towerPulse = now;
+            this.effects.ripple(rec.x, rec.z, theme.states.running, 1.4);
+          };
+          if (this.router.arcStyle === 'comet') this.effects.comet(from, top, theme.effects.wake, arrive);
+          else this.effects.arc(from, top, theme.effects.wake, arrive);
           this.pinLabel(key, CHANGE_LABEL_SECONDS);
           break;
         }
         case 'agent_suspended':
-          this.effects.ripple(rec.x, rec.z, 0x6f8fd8, 1.6);
-          this.effects.ripple(rec.x, rec.z, 0x6f8fd8, 1.6, 0.35);
+          this.effects.ripple(rec.x, rec.z, theme.effects.suspend, 1.6);
+          this.effects.ripple(rec.x, rec.z, theme.effects.suspend, 1.6, 0.35);
           this.pinLabel(key, CHANGE_LABEL_SECONDS);
           break;
         case 'agent_crashed':
-          this.effects.shock(rec.x, rec.z, 0xff3b5c);
+          this.effects.shock(rec.x, rec.z, theme.effects.crash);
           this.pinLabel(key, CHANGE_LABEL_SECONDS * 2);
           break;
         case 'task_updated':
-          if (ev.new) this.effects.beam(rec.x, rec.z, 0x7fe8ff);
+          if (ev.new) this.effects.beam(rec.x, rec.z, theme.effects.beam);
           break;
         case 'worker_assignment':
           workersChanged = true;
@@ -685,11 +703,13 @@ export class Scene {
       this.layers[cls].mesh.instanceColor.setXYZ(rec.slot, c.r, c.g, c.b);
       this.layers[cls].markDirty();
     }
-    this.animateHeight(rec, CLASS_HEIGHT[cls], cls === 'suspended' ? 1.6 : 1.0);
+    this.animatePose(rec, cls === 'suspended' ? 1.6 : 1.0);
   }
 
-  animateHeight(rec, to, dur) {
-    this.anims.set(rec.key, { from: rec.h, to, t0: this.time.value, dur });
+  /** Animates an agent from its current pose to its class's pose. */
+  animatePose(rec, dur) {
+    const to = this.shape.pose[rec.cls];
+    this.anims.set(rec.key, { fromH: rec.h, fromTip: rec.tip, toH: to.h, toTip: to.tip, t0: this.time.value, dur });
   }
 
   flash(key) {
@@ -734,9 +754,9 @@ export class Scene {
       g.remove(child);
       child.traverse?.((o) => {
         o.geometry?.dispose();
-        if (o.material) {
-          o.material.map?.dispose();
-          o.material.dispose();
+        for (const m of [o.material].flat()) {
+          m?.map?.dispose();
+          m?.dispose();
         }
         if (o.isCSS2DObject) o.element.remove();
       });
@@ -751,38 +771,60 @@ export class Scene {
     const shape = roundedRect(islandW, islandD, 3.5);
     const slabGeo = new THREE.ExtrudeGeometry(shape, { depth: 1.4, bevelEnabled: true, bevelThickness: 0.35, bevelSize: 0.35, bevelSegments: 3, curveSegments: 12 });
     slabGeo.rotateX(Math.PI / 2);
-    const slab = new THREE.Mesh(slabGeo, new THREE.MeshStandardMaterial({ color: 0x18253f, roughness: 0.8, metalness: 0.2 }));
+    const light = !theme.glow.additive;
+    const blend = this.blending;
+    const slab = new THREE.Mesh(slabGeo, [
+      new THREE.MeshStandardMaterial({ color: theme.island.fill, roughness: light ? 0.9 : 0.8, metalness: light ? 0 : 0.2 }),
+      new THREE.MeshStandardMaterial({ color: theme.island.side, roughness: light ? 0.9 : 0.8, metalness: light ? 0 : 0.2 }),
+    ]);
     slab.position.set(this.island.cx, -0.4, this.island.cz);
+    slab.receiveShadow = true;
     g.add(slab);
+
+    // Shadows cover the island.
+    const span = Math.max(islandW, islandD) * 0.75 + 6;
+    const cam = this.sun.shadow.camera;
+    cam.left = -span;
+    cam.right = span;
+    cam.top = span;
+    cam.bottom = -span;
+    cam.near = 1;
+    cam.far = 400;
+    cam.updateProjectionMatrix();
+    this.sun.target.position.set(this.island.cx, 0, this.island.cz);
+    // From the front left, so shadows fall to the right where the camera sees them.
+    this.sun.position.set(this.island.cx - 70, 80, this.island.cz + 35);
 
     // Glowing rim around the top edge.
     const rimPts = shape.getPoints(96).map((p) => new THREE.Vector3(p.x + this.island.cx, 0.0, p.y + this.island.cz));
     rimPts.push(rimPts[0].clone());
     const rim = new THREE.Line(
       new THREE.BufferGeometry().setFromPoints(rimPts),
-      new THREE.LineBasicMaterial({ color: 0x3d7bd9, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending }),
+      new THREE.LineBasicMaterial({ color: theme.island.edge, transparent: true, opacity: theme.island.edgeAlpha, blending: blend }),
     );
     g.add(rim);
 
     // Cluster name along the front edge.
-    const name = textPlane(clusterName || 'cluster', { size: 1.5, color: '#4d6aa6' });
+    const name = textPlane(clusterName || 'cluster', { size: 1.5, color: theme.island.label });
     name.material.opacity = 0.75;
     name.position.set(this.island.cx - islandW / 2 + 2.4 + name.geometry.parameters.width / 2, 0.03, this.island.cz + islandD / 2 - 1.3);
     g.add(name);
 
     // Districts.
     for (const d of districts.values()) {
-      const hue = 0.55 + (hashString(d.name) - 0.5) * 0.25;
-      const tileColor = new THREE.Color().setHSL(hue, 0.3, 0.085);
+      // A small per-district hue shift so neighbours read apart.
+      const jitter = (hashString(d.name) - 0.5) * theme.district.fillJitter;
+      const tileColor = new THREE.Color(theme.district.fill).offsetHSL(jitter, 0, 0);
       const tile = new THREE.Mesh(
         new THREE.BoxGeometry(d.w, 0.12, d.d),
-        new THREE.MeshStandardMaterial({ color: tileColor, roughness: 0.7, metalness: 0.2 }),
+        new THREE.MeshStandardMaterial({ color: tileColor, roughness: light ? 0.9 : 0.7, metalness: light ? 0 : 0.2 }),
       );
       tile.position.set(d.x + d.w / 2, 0.06, d.z + d.d / 2);
+      tile.receiveShadow = true;
       g.add(tile);
       const edges = new THREE.LineSegments(
         new THREE.EdgesGeometry(new THREE.BoxGeometry(d.w + 0.04, 0.16, d.d + 0.04)),
-        new THREE.LineBasicMaterial({ color: new THREE.Color().setHSL(hue, 0.7, 0.5), transparent: true, opacity: 0.45, blending: THREE.AdditiveBlending }),
+        new THREE.LineBasicMaterial({ color: new THREE.Color(theme.district.edge).offsetHSL(jitter, 0, 0), transparent: true, opacity: theme.district.edgeAlpha, blending: blend }),
       );
       edges.position.copy(tile.position);
       g.add(edges);
@@ -794,7 +836,7 @@ export class Scene {
       }
       const dotGeo = new THREE.BufferGeometry();
       dotGeo.setAttribute('position', new THREE.Float32BufferAttribute(dots, 3));
-      g.add(new THREE.Points(dotGeo, new THREE.PointsMaterial({ color: new THREE.Color().setHSL(hue, 0.4, 0.35), size: 0.12, transparent: true, opacity: 0.6 })));
+      g.add(new THREE.Points(dotGeo, new THREE.PointsMaterial({ color: theme.district.dots, size: 0.12, transparent: true, opacity: 0.8 })));
 
       const div = document.createElement('div');
       div.className = 'district-label';
@@ -805,38 +847,7 @@ export class Scene {
       d.label = div;
     }
 
-    // Router tower on the left edge.
-    const tx = this.island.cx - islandW / 2 + 2.6;
-    const tz = this.island.cz - islandD / 2 + 2.6;
-    const tower = new THREE.Group();
-    const shaft = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.3, 0.75, 7, 6),
-      new THREE.MeshStandardMaterial({ color: 0x1c2b4a, roughness: 0.4, metalness: 0.6, emissive: 0x0b1a33 }),
-    );
-    shaft.position.y = 3.5;
-    tower.add(shaft);
-    for (let i = 1; i <= 3; i++) {
-      const band = new THREE.Mesh(
-        new THREE.TorusGeometry(0.75 - i * 0.12, 0.05, 6, 24),
-        new THREE.MeshBasicMaterial({ color: 0x5fb8ff }),
-      );
-      band.rotation.x = Math.PI / 2;
-      band.position.y = i * 1.8;
-      tower.add(band);
-    }
-    const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.38, 20, 14), new THREE.MeshBasicMaterial({ color: 0x9fdcff }));
-    beacon.position.y = 7.4;
-    tower.add(beacon);
-    const tdiv = document.createElement('div');
-    tdiv.className = 'tower-label';
-    tdiv.textContent = 'atenet router';
-    const tlabel = new CSS2DObject(tdiv);
-    tlabel.position.y = 8.4;
-    tower.add(tlabel);
-    tower.position.set(tx, 0, tz);
-    g.add(tower);
-    this.towerTop = new THREE.Vector3(tx, 7.4, tz);
-    this.beacon = beacon;
+    this.buildRouter();
   }
 
   /**
@@ -926,19 +937,21 @@ export class Scene {
         const group = new THREE.Group();
         const pad = new THREE.Mesh(
           new THREE.BoxGeometry(3.2, 0.3, 1.8),
-          new THREE.MeshStandardMaterial({ color: 0x1b2c4c, roughness: 0.45, metalness: 0.5, emissive: 0x08162c }),
+          new THREE.MeshStandardMaterial({ roughness: 0.45, metalness: 0.5 }),
         );
         pad.position.y = 0.15;
+        pad.castShadow = true;
+        pad.receiveShadow = true;
         group.add(pad);
         const padEdges = new THREE.LineSegments(
           new THREE.EdgesGeometry(new THREE.BoxGeometry(3.24, 0.32, 1.84)),
-          new THREE.LineBasicMaterial({ color: 0x4f8fe0, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending }),
+          new THREE.LineBasicMaterial({ transparent: true, opacity: 0.55 }),
         );
         padEdges.position.y = 0.15;
         group.add(padEdges);
         const glow = new THREE.Mesh(
           new THREE.PlaneGeometry(2.8, 1.4),
-          new THREE.MeshBasicMaterial({ color: 0x2ee6c5, transparent: true, opacity: 0.0, blending: THREE.AdditiveBlending, depthWrite: false }),
+          new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.0, depthWrite: false }),
         );
         glow.rotation.x = -Math.PI / 2;
         glow.position.y = 0.31;
@@ -949,7 +962,7 @@ export class Scene {
         label.position.set(0, 0.2, 1.75);
         group.add(label);
         this.world.add(group);
-        w = { group, glow, label };
+        w = { group, pad, padEdges, glow, label };
         this.workers.set(wk.name, w);
       }
       const row = Math.floor(i / perRow);
@@ -959,9 +972,18 @@ export class Scene {
       const z = this.workerRowZ + row * 3;
       w.group.position.set(x, 0, z);
       const running = hosted.get(wk.name) || 0;
-      w.glow.material.opacity = running ? 0.06 + Math.min(running, 8) * 0.02 : 0.0;
-      w.glow.material.color.set(wk.state === 'DRAINING' ? 0xffb547 : 0x2ee6c5);
-      w.label.visible = list.length <= 16;
+      const light = !theme.glow.additive;
+      w.pad.material.color.set(running ? theme.worker.pad : theme.worker.idle);
+      w.pad.material.roughness = light ? 0.85 : 0.45;
+      w.pad.material.metalness = light ? 0 : 0.5;
+      w.padEdges.material.color.set(theme.worker.padEdge);
+      w.padEdges.material.blending = this.blending;
+      w.glow.material.blending = this.blending;
+      w.glow.material.opacity = running ? (0.06 + Math.min(running, 8) * 0.02) * (light ? 2.5 : 1) : 0.0;
+      w.glow.material.color.set(wk.state === 'DRAINING' ? theme.worker.draining : theme.worker.active);
+      w.name = wk.name;
+      w.state = wk.state;
+      w.label.visible = false;
       w.label.element.innerHTML = `<div class="name">${esc(workerLabel(wk))}</div><div class="meta">${running} actor${running === 1 ? '' : 's'}${wk.state && wk.state !== 'ACTIVE' ? ' · ' + esc(wk.state.toLowerCase()) : ''}</div>`;
       w.pos = new THREE.Vector3(x, 0.32, z);
     });
@@ -973,23 +995,39 @@ export class Scene {
     for (const rec of this.recs.values()) {
       const wk = rec.agent.worker && this.workers.get(rec.agent.worker);
       if (!wk || !wk.pos) continue;
-      pts.push(rec.x, Math.max(rec.h, 0.2) + 0.12, rec.z, wk.pos.x, wk.pos.y, wk.pos.z);
+      pts.push(rec.x, this.topOf(rec), rec.z, wk.pos.x, wk.pos.y, wk.pos.z);
     }
     const g = this.workerLines.geometry;
     g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
     // Many lines add up; keep the bundle faint as it grows.
     const n = pts.length / 6;
-    this.workerLines.material.opacity = Math.min(0.24, Math.max(0.035, 0.24 * Math.sqrt(12 / Math.max(n, 1))));
+    const a = theme.links.alpha;
+    this.workerLines.material.opacity = Math.min(a, Math.max(a * 0.15, a * Math.sqrt(12 / Math.max(n, 1))));
     g.computeBoundingSphere();
   }
 
   // --------------------------------------------------------------- camera
 
+  /** Pixels on the left covered by the events panel (the fit keeps clear of them). */
+  setLeftInset(px) {
+    this.leftInset = px;
+  }
+
   fitCamera() {
+    // Frame the island in the part of the view the events panel leaves
+    // free: pull back to fit the narrower width and shift the target left
+    // so the island (and the router tower on its left edge) clears the panel.
+    const W = this.renderer.domElement.clientWidth || window.innerWidth;
+    const inset = Math.min(this.leftInset || 0, W * 0.4);
     const span = Math.max(this.island.width, this.island.depth * 1.5);
-    const dist = Math.max(26, span * 0.95);
-    this.controls.target.set(this.island.cx, 0, this.island.cz + 0.5);
-    this.camera.position.set(this.island.cx + dist * 0.1, dist * 0.56, this.island.cz + dist * 0.84);
+    const dist = Math.max(26, span * 0.95) * (W / (W - inset));
+    const viewW = 2 * dist * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) * this.camera.aspect;
+    const cx = this.island.cx - (inset / 2 / W) * viewW;
+    // Aim a little toward the front edge when pulled back, so the island
+    // uses the empty sky above it.
+    const cz = this.island.cz + 0.5 + (inset ? this.island.depth * 0.05 : 0);
+    this.controls.target.set(cx, 0, cz);
+    this.camera.position.set(cx + dist * 0.1, dist * 0.56, cz + dist * 0.84);
     this.controls.update();
   }
 
@@ -1021,7 +1059,7 @@ export class Scene {
     }
     this.marker.group.visible = true;
     this.marker.group.position.set(rec.x, 0.14, rec.z);
-    const top = Math.max(rec.h, 0.2) + 0.12;
+    const top = this.topOf(rec);
     this.marker.beam.scale.y = 3;
     this.marker.beam.position.y = top + 1.5;
   }
@@ -1055,12 +1093,24 @@ export class Scene {
     const r = this.renderer.domElement.getBoundingClientRect();
     this.pointer.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    const meshes = CLASSES.map((c) => this.layers[c].mesh).filter((m) => m.count > 0);
-    const hits = this.raycaster.intersectObjects(meshes, false);
+    const hits = this.raycaster.intersectObjects(this.agents.pickable(), false);
     for (const h of hits) {
       const layer = h.object.userData.layer;
       if (h.instanceId !== undefined && h.instanceId < layer.keys.length) return layer.keys[h.instanceId];
     }
+    return null;
+  }
+
+  /** The worker pad under the pointer, by worker name. */
+  pickWorker(clientX, clientY) {
+    if (!this.hoverAt) return null;
+    const r = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const pads = [...this.workers.values()].map((w) => w.pad);
+    const hit = this.raycaster.intersectObjects(pads, false)[0];
+    if (!hit) return null;
+    for (const [name, w] of this.workers) if (w.pad === hit.object) return name;
     return null;
   }
 
@@ -1092,14 +1142,15 @@ export class Scene {
       }
       const k = Math.min((t - an.t0) / an.dur, 1);
       const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
-      rec.h = an.from + (an.to - an.from) * e;
+      rec.h = an.fromH + (an.toH - an.fromH) * e;
+      rec.tip = an.fromTip + (an.toTip - an.fromTip) * e;
       this.writeMatrix(rec);
       if (rec.agent.worker) linesDirty = true;
       if (key === this.selected) this.updateMarker();
       if (k >= 1) this.anims.delete(key);
     }
     if (linesDirty) this.rebuildWorkerLines();
-    for (const l of Object.values(this.layers)) l.flush();
+    this.agents.flush();
 
     // Fly-to.
     if (this.flyAnim) {
@@ -1117,12 +1168,7 @@ export class Scene {
       const s = 1 + 0.12 * Math.sin(t * 3);
       this.marker.ring.scale.set(s, s, s);
     }
-    if (this.beacon) {
-      const since = this.towerPulse !== undefined ? t - this.towerPulse : 99;
-      const k = 0.8 + 0.2 * Math.sin(t * 2) + 2.5 * Math.exp(-since * 2.5);
-      this.beacon.scale.setScalar(0.8 + 0.25 * k);
-      this.beacon.material.color.setRGB(0.55 * k, 0.85 * k, 1.0 * k);
-    }
+    this.router?.update(t, dt);
 
     this.effects.update(t);
 
@@ -1130,16 +1176,82 @@ export class Scene {
       this.lastHoverPick = t;
       const key = this.pick(this.hoverAt.x, this.hoverAt.y);
       this.setHover(key, this.hoverAt.x, this.hoverAt.y);
+      const pad = key ? null : this.pickWorker(this.hoverAt.x, this.hoverAt.y);
+      if (pad !== this.hoverWorker) {
+        this.hoverWorker = pad;
+        this.lastLabelUpdate = -1;
+      }
     }
 
     if (t - this.lastLabelUpdate > 0.25) {
       this.lastLabelUpdate = t;
       this.updateAgentLabels();
       this.layoutDistrictLabels();
+      this.layoutWorkerLabels();
+      this.keepRouterLabelClear();
     }
 
     this.composer.render();
     this.labelRenderer.render(this.scene, this.camera);
+  }
+
+  /**
+   * Worker pad labels are quiet like agent labels: shown for the hovered
+   * pad, the selected agent's pad, pads that aren't plainly active (for
+   * example draining), and every pad when the camera is close to it or
+   * labels are 'all'. They are placed greedily in screen space after the
+   * district and agent labels and never overlap them or each other.
+   */
+  layoutWorkerLabels() {
+    if (!this.workers.size) return;
+    const W = this.renderer.domElement.clientWidth;
+    const H = this.renderer.domElement.clientHeight;
+    const cam = this.camera.position;
+    const mode = this.labelMode;
+    const host = this.selected && this.recs.get(this.selected)?.agent.worker;
+    const placed = [];
+    const obstacle = (el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width) placed.push({ x0: r.left, x1: r.right, y0: r.top, y1: r.bottom });
+    };
+    for (const o of this.agentLabels) if (o.visible) obstacle(o.element);
+    if (this.plan) for (const d of this.plan.districts.values()) if (d.label && !d.label.classList.contains('crowded')) obstacle(d.label);
+    const items = [];
+    const wp = new THREE.Vector3();
+    for (const [name, w] of this.workers) {
+      w.label.getWorldPosition(wp);
+      const notable = !!w.state && w.state !== 'ACTIVE';
+      const prio = name === this.hoverWorker ? 0 : name === host ? 1 : notable ? 2 : 3;
+      const near = cam.distanceTo(wp) < WORKER_LABEL_DISTANCE;
+      const want = prio === 0 || (mode !== 'off' && (prio < 3 || near || mode === 'all'));
+      w.label.visible = false;
+      if (want) items.push({ w, prio, d: cam.distanceTo(wp), p: wp.clone() });
+    }
+    items.sort((a, b) => a.prio - b.prio || a.d - b.d);
+    for (const { w, p } of items) {
+      p.project(this.camera);
+      if (p.z > 1) continue;
+      const x = (p.x * 0.5 + 0.5) * W;
+      const y = (-p.y * 0.5 + 0.5) * H;
+      // Estimated from the text: the element isn't laid out while hidden.
+      const chars = Math.max(4, ...[...w.label.element.children].map((c) => c.textContent.length));
+      const half = chars * 3.2 + 6;
+      const box = { x0: x - half, x1: x + half, y0: y - 15, y1: y + 15 };
+      if (placed.some((b) => box.x0 < b.x1 && box.x1 > b.x0 && box.y0 < b.y1 && box.y1 > b.y0)) continue;
+      placed.push(box);
+      w.label.visible = true;
+    }
+  }
+
+  /** Moves the router's label to the right of its anchor when the events panel would cover it. */
+  keepRouterLabelClear() {
+    const l = this.router?.labelObj;
+    if (!l) return;
+    const p = l.getWorldPosition(new THREE.Vector3()).project(this.camera);
+    const x = (p.x * 0.5 + 0.5) * this.renderer.domElement.clientWidth;
+    const w = l.element.offsetWidth || 110;
+    const covered = x - w / 2 < (this.leftInset || 0);
+    l.center.set(covered ? 0 : 0.5, 0.5);
   }
 
   /**
@@ -1161,7 +1273,7 @@ export class Scene {
     const maxDist = mode === 'all' ? 60 : closeUp ? 34 : 0;
     if (mode !== 'off') {
       for (const rec of this.recs.values()) {
-        p.set(rec.x, rec.h, rec.z);
+        p.set(rec.x, this.topOf(rec), rec.z);
         const selected = rec.key === this.selected;
         const until = this.labelPinned.get(rec.key) || 0;
         const pinned = until > t;
@@ -1193,7 +1305,7 @@ export class Scene {
     for (const item of near) {
       if (chosen.length >= this.agentLabels.length) break;
       const { rec } = item;
-      p.set(rec.x, Math.max(rec.h, 0.2) + 0.25, rec.z).project(this.camera);
+      p.set(rec.x, this.topOf(rec) + 0.13, rec.z).project(this.camera);
       const x = (p.x * 0.5 + 0.5) * W;
       const y = (-p.y * 0.5 + 0.5) * H;
       const w = 40 + rec.agent.name.length * 7 + (rec.agent.state.length + 8) * 5.6;
@@ -1213,7 +1325,7 @@ export class Scene {
       }
       const { rec } = item;
       obj.visible = true;
-      obj.position.set(rec.x, Math.max(rec.h, 0.2) + 0.25, rec.z);
+      obj.position.set(rec.x, this.topOf(rec) + 0.13, rec.z);
       const a = rec.agent;
       const age = duration(since(a.stateSince, now));
       const html = `<span class="dot" style="background:${cssColor(a.state)}"></span>${esc(a.name)}<span class="sub">${esc(a.state.toLowerCase())} ${age}</span>`;
