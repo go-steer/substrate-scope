@@ -13,12 +13,18 @@ Rendered with three.js and GPU instancing so a cluster with thousands of agents 
 - The **island** is the cluster. Each **district** is an atespace, sized by how many agents it holds.
 - Each **agent** is a column. Running agents stand tall and glow teal, suspended ones lie flat and dim, agents changing state are amber, crashed ones pulse red, and agents with no state yet are drawn as outlines.
 - **Events** play as short animations: an arc from the router tower when a request wakes an agent, a ripple when an agent is suspended, a red shockwave when one crashes, a beam of light when a new task appears.
-- **Worker pads** line the front of the island; a faint line connects each running agent to the worker that hosts it.
+- **Worker pads** line the front of the island, each with a fill bar for its actor slots (and CPU and memory when the worker reports them). A faint arc with small flowing dots connects each agent that holds a worker to it; busier agents send more and faster dots.
+- **Which agents run where:** hover or click a worker pad and its agents light up (the rest recede), its arcs brighten, and the pad shows a card with the worker's node, agents, and slots/CPU/memory used. Hover or select an agent and its worker lights up, with a subtle highlight on its siblings; the side panel's **show worker** pins the worker and flies to it. Esc or a click on empty space clears it.
+- **Group by worker:** the **Group: atespace | worker** toggle in the header (or `g`, or `?group=worker`; remembered) re-flows the island so each worker is a platform holding its agents, with agents that hold no worker (suspended, pending) parked behind them. Each agent stands on a tile tinted by its atespace, so "which team runs here" is still answerable. Agents glide between the layouts.
 - Click an agent for the **side panel**: Substrate state, worker, template, snapshot; ax phase, conditions and reasons (`IdleSuspended`, `ResumedByRequest`, ...), the idle policy and, for running ax tasks, the live idle time. With the attach proxy configured you can list the agent's sessions and **open the agent in [mast-web](https://github.com/go-steer/mast-web)**, a full attach client: read the transcript, send messages, start sessions, interrupt, approve or deny parked actions. A suspended agent gets a **Wake** button that asks first.
 - **Live events** sit in a panel on the left (newest on top, colored by kind; click one to fly to its agent). `e` or the ‹ button collapses it to a tab; the choice is remembered.
 - **Labels** stay quiet: only the selected agent, agents that just changed state (for a few seconds) and, when you zoom in close, the agents around you. Hover an agent for a tooltip. The **Labels** button (or `l`) switches between auto, all and off.
 - **Filters** (atespace, state chips, name prefix) dim everything that doesn't match. `/` focuses the search, Enter flies to the first match, `h` shows the whole island, Esc closes the panel. `?synthetic=5000` replaces the collector with 5,000 generated agents, for looking at the scene at scale.
 - **Themes**: eight themes (four dark, four light) from the picker at the right of the header, or `?theme=<id>` (`orchid-night`, `abyss-neon`, `volt-noir`, `cotton-candy`, `riso-paper`, `glacier`, `google-light`, `google-dark`). The choice is remembered; `?tour=1` cycles through them every 8 seconds. Every color, light and glow value lives in `web/js/themes.js`.
+
+| Hovering a worker pad | Grouped by worker | A worker pinned in worker view |
+|---|---|---|
+| ![Worker pad hovered](docs/images/workers/pad-hover-orchid-night.jpg) | ![Worker view](docs/images/workers/worker-view-orchid-night.jpg) | ![Worker pinned](docs/images/workers/worker-view-pinned-orchid-night.jpg) |
 
 | A request wakes a suspended agent | The side panel: ax reasons and live idle time | A lookout incident in mast-web, opened from the panel |
 |---|---|---|

@@ -19,11 +19,11 @@ import { Model, CLASSES, CLASS_LABEL, makeFilter, stateClass } from './model.js'
 import { Stream, streamURL } from './stream.js';
 import { Scene, cssColor } from './scene.js';
 import { Panel } from './panel.js';
-import { esc, duration, since, clock } from './format.js';
+import { esc, duration, since, clock, workerLabel } from './format.js';
 import { describe } from './feed.js';
 import { SyntheticStream, syntheticDetail } from './synth.js';
 import { ThemePicker } from './theming.js';
-import { LookPicker, initialLooks } from './looks.js';
+import { LookPicker, initialLooks, rememberGroup } from './looks.js';
 import { inkOn } from './themes.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -38,11 +38,16 @@ const looks0 = initialLooks();
 const scene = new Scene(
   $('#viewport'),
   {
-    onPick: (key) => select(key, false),
+    onPick: (key, worker) => pick(key, worker),
     onHover: (key, x, y) => hover(key, x, y),
+    onHoverWorker: (name) => {
+      hoverWorker = name;
+      document.body.style.cursor = name ? 'pointer' : '';
+    },
   },
-  { shape: looks0.agents, router: looks0.router, extras: looks0.extras },
+  { shape: looks0.agents, router: looks0.router, extras: looks0.extras, group: looks0.group },
 );
+let hoverWorker = null;
 // ?synthetic=N replaces the collector with N generated agents (scale checks
 // and design work without a cluster).
 const synthetic = Number(new URLSearchParams(window.location.search).get('synthetic')) || 0;
@@ -60,6 +65,10 @@ const looks = new LookPicker(
 
 const panel = new Panel($('#panel'), {
   onClose: () => select(null),
+  onShowWorker: (name) => {
+    scene.pinWorker(name);
+    scene.flyToWorker(name);
+  },
   features: () => model.features,
   detail: synthetic > 0 ? (key) => syntheticDetail(model.agents.get(key)) : undefined,
 });
@@ -121,6 +130,31 @@ function initialSelection() {
 
 // --------------------------------------------------------------- selection
 
+/** A click in the scene: an agent selects it, a worker pad pins (or unpins) it, empty space clears both. */
+function pick(key, worker) {
+  if (key) {
+    scene.pinWorker(null);
+    select(key, false);
+  } else if (worker) {
+    scene.pinWorker(scene.pinnedWorker === worker ? null : worker);
+  } else {
+    scene.pinWorker(null);
+    select(null);
+  }
+}
+
+// Group by atespace or by worker (header toggle, g, ?group=; remembered).
+function setGroup(mode, remember = true) {
+  scene.setGroup(mode);
+  document.querySelectorAll('#group button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.group === scene.group)));
+  if (remember) rememberGroup(scene.group);
+}
+$('#group').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-group]');
+  if (b) setGroup(b.dataset.group);
+});
+setGroup(looks0.group, false);
+
 function select(key, fly = true) {
   selected = key;
   scene.select(key);
@@ -140,7 +174,7 @@ function hover(key, x, y) {
   const a = key && model.agents.get(key);
   if (!a) {
     tip.style.display = 'none';
-    document.body.style.cursor = '';
+    document.body.style.cursor = hoverWorker ? 'pointer' : '';
     return;
   }
   document.body.style.cursor = 'pointer';
@@ -148,8 +182,10 @@ function hover(key, x, y) {
   tip.style.left = `${x + 14}px`;
   tip.style.top = `${y + 14}px`;
   const reason = a.task?.conditions?.find((c) => c.type === 'Ready')?.reason;
+  const wk = a.worker && model.workers.get(a.worker);
   tip.innerHTML = `<div class="t-name">${esc(a.atespace)}/<b>${esc(a.name)}</b></div>
     <div><span class="dot" style="background:${cssColor(a.state)}"></span>${esc(a.state.toLowerCase())} for ${duration(since(a.stateSince))}</div>
+    ${a.worker ? `<div class="muted">on ${esc(wk ? workerLabel(wk) : a.worker)}</div>` : ''}
     ${a.task ? `<div class="muted">ax ${esc(a.task.phase || '')}${reason ? ' · ' + esc(reason) : ''}</div>` : ''}`;
 }
 
@@ -197,7 +233,11 @@ $('#legend').addEventListener('click', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   const typing = document.activeElement?.tagName === 'INPUT';
-  if (e.key === 'Escape') select(null);
+  if (e.key === 'Escape') {
+    scene.pinWorker(null);
+    select(null);
+  }
+  if (e.key === 'g' && !typing) setGroup(scene.group === 'worker' ? 'atespace' : 'worker');
   if (e.key === '/' && !typing) {
     e.preventDefault();
     $('#prefix').focus();

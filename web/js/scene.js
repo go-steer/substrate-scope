@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The 3D scene: the cluster island, atespace districts, agents (one
-// InstancedMesh per visual class, in a switchable shape), worker pads, the
+// The 3D scene: the cluster island, districts (atespaces, or workers in the
+// "group by worker" view), agents (one InstancedMesh per visual class, in a
+// switchable shape), worker pads with flowing links to their agents, the
 // router (in a switchable look), and the short animations that show events.
 
 import * as THREE from 'three';
@@ -32,6 +33,10 @@ import { planIsland, slotPosition, SlotTable } from './layout.js';
 import { esc, duration, since, workerLabel } from './format.js';
 import { Effects } from './effects.js';
 import { themeById, classColor, hex } from './themes.js';
+import { buildGround, hashString } from './island.js';
+import { LinkSet } from './links.js';
+import { WorkerPads, PAD_W } from './pads.js';
+import { PARKED, WORKER_STRIP, groupId, groupOf, groupCounts, planWorkerView, focusOf, levelOf, sameFocus, workerUsage, teamHues, teamCSS } from './workers.js';
 
 // The active theme (see themes.js). Every state shares its class color: the
 // five class colors of a theme are validated as a set.
@@ -60,31 +65,6 @@ function gradientTexture(top, bottom) {
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
-}
-
-function hashString(s) {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return (h >>> 0) / 4294967295;
-}
-
-function roundedRect(w, d, r) {
-  const s = new THREE.Shape();
-  const x = -w / 2;
-  const y = -d / 2;
-  s.moveTo(x + r, y);
-  s.lineTo(x + w - r, y);
-  s.quadraticCurveTo(x + w, y, x + w, y + r);
-  s.lineTo(x + w, y + d - r);
-  s.quadraticCurveTo(x + w, y + d, x + w - r, y + d);
-  s.lineTo(x + r, y + d);
-  s.quadraticCurveTo(x, y + d, x, y + d - r);
-  s.lineTo(x, y + r);
-  s.quadraticCurveTo(x, y, x + r, y);
-  return s;
 }
 
 /** A flat text plane drawn with a canvas texture (for the island's name). */
@@ -121,12 +101,16 @@ const CHANGE_LABEL_SECONDS = 6;
 const CLOSE_UP_DISTANCE = 20;
 // Camera-to-pad distance under which worker pads show their labels.
 const WORKER_LABEL_DISTANCE = 34;
+// Seconds agents take to move between layouts when the grouping changes.
+const MOVE_SECONDS = 0.8;
+// Above this many agents, layout changes are instant (no tween).
+const MOVE_MAX_AGENTS = 20000;
 
 export class Scene {
   /**
    * @param {HTMLElement} container
    * @param {{onPick?: Function, onHover?: Function}} handlers
-   * @param {{shape?: string, router?: string, extras?: boolean}} opts initial agent shape, router look, extras
+   * @param {{shape?: string, router?: string, extras?: boolean, group?: string}} opts initial agent shape, router look, extras, grouping
    */
   constructor(container, handlers = {}, opts = {}) {
     this.container = container;
@@ -141,8 +125,21 @@ export class Scene {
     // Agent labels: 'auto' (selected, recent changes, close-ups), 'all', 'off'.
     this.labelMode = 'auto';
     this.plan = null;
-    this.workers = new Map();
     this.model = null;
+    // 'atespace' or 'worker': what the districts are (see workers.js).
+    this.group = groupId(opts.group);
+    // What the user points at; focusOf() turns it into the worker in focus.
+    this.hl = { hoverWorker: null, pinnedWorker: null, hoverAgent: null, selectedAgent: null };
+    this.focus = { worker: null, strong: false };
+    // Agents moving between layouts: key -> {fx, fz, tx, tz, t0, dur}.
+    this.moves = new Map();
+    this.teams = new Map();
+    const rm = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    this.reducedMotion = !!rm?.matches;
+    rm?.addEventListener?.('change', (e) => {
+      this.reducedMotion = e.matches;
+      this.links.setFlow(this.extras && !this.reducedMotion);
+    });
     // ?slowmo=N plays animations N times slower (for recording demos and
     // for screenshots with a software renderer).
     const params = new URLSearchParams(window.location.search);
@@ -210,6 +207,12 @@ export class Scene {
       uOcc: { value: 0 },
       uAdditive: { value: 1 },
       uDimColor: { value: new THREE.Color() },
+      // How far agents outside a focused worker recede.
+      uHiDim: { value: 0.7 },
+      // Atespace tiles (worker view): strength, and the tints' saturation and lightness.
+      uTeam: { value: 0 },
+      uTeamSat: { value: 0.5 },
+      uTeamLight: { value: 0.6 },
     };
 
     this.world = new THREE.Group();
@@ -225,13 +228,14 @@ export class Scene {
     this.addBackdrop();
     this.addSelectionMarker();
 
-    // Worker lines: one LineSegments rebuilt when assignments change.
-    this.workerLines = new THREE.LineSegments(
-      new THREE.BufferGeometry(),
-      new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.22, depthWrite: false }),
-    );
-    this.workerLines.frustumCulled = false;
-    this.world.add(this.workerLines);
+    // Agent-to-worker links (arcs with flowing dots) and the worker pads.
+    this.links = new LinkSet(this.world, this.time);
+    this.links.setFlow(this.extras && !this.reducedMotion);
+    this.pads = new WorkerPads(this.world, (cls) => {
+      const div = document.createElement('div');
+      div.className = cls;
+      return new CSS2DObject(div);
+    });
 
     // Post-processing: bloom on the emissive parts.
     const composer = new EffectComposer(renderer);
@@ -351,6 +355,7 @@ export class Scene {
     this.bloom.resolution.set(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    this.links.setScale(h / (2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))));
   }
 
   // ---------------------------------------------------------------- theme
@@ -403,6 +408,9 @@ export class Scene {
     this.look.uOcc.value = g.occlusion;
     this.look.uAdditive.value = g.additive ? 1 : 0;
     this.look.uDimColor.value.set(sc.background);
+    this.look.uHiDim.value = g.additive ? 0.72 : 0.78;
+    this.look.uTeamSat.value = t.team.saturation;
+    this.look.uTeamLight.value = t.team.lightness;
     // Light themes draw every class at full strength (their suspended color
     // is already pale) and blend the extras normally.
     this.agents.setTheme(t);
@@ -413,8 +421,7 @@ export class Scene {
     this.bloom.threshold = t.bloom.threshold;
 
     const blend = this.blending;
-    this.workerLines.material.color.set(t.links.color);
-    this.workerLines.material.blending = blend;
+    this.styleLinks();
     this.marker.ring.material.color.set(t.marker.select);
     this.marker.beam.material.color.set(t.marker.select);
     this.hoverRing.material.color.set(t.marker.hover);
@@ -453,7 +460,7 @@ export class Scene {
       rec.tip = pose.tip;
       this.attach(rec);
     }
-    this.rebuildWorkerLines();
+    this.relinkAll();
     this.updateMarker();
   }
 
@@ -469,6 +476,7 @@ export class Scene {
   setExtras(on) {
     this.extras = on;
     this.agents.setExtras(on);
+    this.links.setFlow(on && !this.reducedMotion);
   }
 
   /** Synthetic mode: fake idle timers and request serving. */
@@ -506,48 +514,106 @@ export class Scene {
     for (const cls of CLASSES) this.layers[cls].clear();
     this.recs.clear();
     this.anims.clear();
+    this.moves.clear();
     this.replan(true);
   }
 
-  /** Lays out the island again and places every agent. */
-  replan(fit = false) {
+  /** The district plan for the current grouping. */
+  makePlan() {
     const model = this.model;
-    const counts = model.atespaceCounts();
+    const counts = groupCounts(model, this.group);
+    if (this.group === 'worker') {
+      const workers = [...counts.entries()]
+        .filter(([name]) => name !== PARKED)
+        .map(([name, count]) => ({ name, count, capacity: model.workers.get(name)?.capacityActors || 0 }));
+      return planWorkerView(workers, counts.get(PARKED) || 0);
+    }
     const atespaces = [...counts.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => (a.name < b.name ? -1 : 1));
+    return planIsland(atespaces.length ? atespaces : [{ name: '(none)', count: 0 }]);
+  }
+
+  /**
+   * Lays out the island again and places every agent. With tween, agents
+   * glide from where they were to their new cells (a grouping change).
+   */
+  replan(fit = false, tween = false) {
+    const model = this.model;
     const firstPlan = !this.plan;
-    this.plan = planIsland(atespaces.length ? atespaces : [{ name: '(none)', count: 0 }]);
+    this.plan = this.makePlan();
     this.slots = new Map();
     for (const d of this.plan.districts.values()) this.slots.set(d.name, new SlotTable(d.capacity));
+    this.teams = teamHues(model.atespaces.size ? model.atespaces.keys() : new Set([...model.agents.values()].map((a) => a.atespace)));
     this.buildIsland(model.cluster);
 
     const keys = [...model.agents.keys()].sort();
     const existing = new Map(this.recs);
     for (const cls of CLASSES) this.layers[cls].clear();
     this.recs.clear();
+    const animate = tween && !this.reducedMotion && keys.length <= MOVE_MAX_AGENTS;
+    const t0 = this.time.value;
+    this.moves.clear();
     for (const key of keys) {
       const a = model.agents.get(key);
       const old = existing.get(key);
-      this.place(key, a, old);
+      if (!this.place(key, a, old)) continue;
+      if (animate && old) {
+        const rec = this.recs.get(key);
+        this.moves.set(key, { fx: old.x, fz: old.z, tx: rec.x, tz: rec.z, t0: t0 + (rec.seed * 0.15), dur: MOVE_SECONDS });
+        rec.x = old.x;
+        rec.z = old.z;
+        this.writeMatrix(rec);
+      }
     }
     this.applyFilter();
     this.rebuildWorkers();
     this.updateDistrictLabels();
+    this.updateMarker();
     if (fit || firstPlan) this.fitCamera();
   }
 
   /** Places an agent; from: an earlier pose to keep (else its class's pose). */
   place(key, a, from) {
-    const table = this.slots.get(a.atespace);
+    const group = groupOf(a, this.group);
+    const table = this.slots.get(group);
     if (!table) return false;
     const slot = table.assign(key);
     if (slot < 0) return false;
-    const district = this.plan.districts.get(a.atespace);
+    const district = this.plan.districts.get(group);
     const p = slotPosition(district, slot);
     const cls = stateClass(a.state);
     const pose = this.shape.pose[cls];
-    const rec = { key, agent: a, cls, slot: -1, x: p.x, z: p.z, h: from?.h ?? pose.h, tip: from?.tip ?? pose.tip, seed: hashString(key) };
+    const rec = { key, agent: a, cls, group, slot: -1, x: p.x, z: p.z, h: from?.h ?? pose.h, tip: from?.tip ?? pose.tip, seed: hashString(key) };
     this.recs.set(key, rec);
     this.attach(rec);
+    return true;
+  }
+
+  /**
+   * Moves an agent whose district changed (worker view: it got or lost a
+   * worker) to a cell in its new district, gliding there. False when the
+   * new district is full or missing (the island must be re-planned).
+   */
+  regroup(rec) {
+    const group = groupOf(rec.agent, this.group);
+    if (group === rec.group) return true;
+    const table = this.slots.get(group);
+    if (!table) return false;
+    const slot = table.assign(rec.key);
+    if (slot < 0) return false;
+    this.slots.get(rec.group)?.release(rec.key);
+    rec.group = group;
+    const layer = this.layers[rec.cls];
+    layer.team.array[rec.slot] = this.teamOf(rec);
+    layer.markDirty();
+    const p = slotPosition(this.plan.districts.get(group), slot);
+    if (this.reducedMotion) {
+      rec.x = p.x;
+      rec.z = p.z;
+      this.moves.delete(rec.key);
+      this.writeMatrix(rec);
+    } else {
+      this.moves.set(rec.key, { fx: rec.x, fz: rec.z, tx: p.x, tz: p.z, t0: this.time.value, dur: MOVE_SECONDS * 1.2 });
+    }
     return true;
   }
 
@@ -557,10 +623,19 @@ export class Scene {
     layer.seed.array[rec.slot] = rec.seed;
     layer.dim.array[rec.slot] = this.filter(rec.agent) ? 0 : 1;
     layer.flash.array[rec.slot] = 0;
+    layer.hi.array[rec.slot] = levelOf(this.focus, rec.agent.worker);
+    layer.team.array[rec.slot] = this.teamOf(rec);
     this.writeActivity(rec);
     const c = new THREE.Color(stateColor(rec.agent.state));
     layer.mesh.instanceColor.setXYZ(rec.slot, c.r, c.g, c.b);
     this.writeMatrix(rec);
+  }
+
+  /** The atespace tint of an agent's tile: its hue, plus 2 when parked (drawn fainter); -1 for none. */
+  teamOf(rec) {
+    const hue = this.teams.get(rec.agent.atespace);
+    if (hue === undefined) return -1;
+    return rec.group === PARKED ? hue + 2 : hue;
   }
 
   detach(rec) {
@@ -590,8 +665,13 @@ export class Scene {
     if (fake) idle = (rec.seed * 7.31) % 1;
     else if (typeof a.idleProgress === 'number') idle = a.idleProgress;
     layer.attrs.aIdle.array[rec.slot] = idle;
-    const serving = fake ? (rec.seed * 13.7) % 1 < 0.22 : (a.inFlight || 0) > 0;
-    layer.attrs.aServe.array[rec.slot] = serving ? 1 : 0;
+    layer.attrs.aServe.array[rec.slot] = this.serving(rec) ? 1 : 0;
+  }
+
+  /** Whether an agent is serving a request (synthetic mode: a fixed random subset). */
+  serving(rec) {
+    if (this.fake.value > 0) return (rec.seed * 13.7) % 1 < 0.22;
+    return (rec.agent.inFlight || 0) > 0;
   }
 
   /** Applies a batch of events that the model has already absorbed. */
@@ -606,8 +686,12 @@ export class Scene {
           replan = true;
           break;
         case 'worker_added':
-        case 'worker_updated':
         case 'worker_removed':
+          // Worker view: platforms come and go.
+          if (this.group === 'worker') replan = true;
+          workersChanged = true;
+          break;
+        case 'worker_updated':
         case 'worker_assignment':
           workersChanged = true;
           break;
@@ -622,14 +706,16 @@ export class Scene {
           this.effects.ripple(rec.x, rec.z, theme.effects.removed, 1.2);
           this.detach(rec);
           this.recs.delete(key);
-          this.slots.get(rec.agent.atespace)?.release(key);
+          this.moves.delete(key);
+          this.links.remove(key);
+          this.slots.get(rec.group)?.release(key);
         }
         workersChanged = true;
         continue;
       }
       let rec = this.recs.get(key);
       if (!rec) {
-        if (!this.slots.has(ev.agent.atespace) || !this.place(key, ev.agent)) {
+        if (!this.place(key, ev.agent)) {
           replan = true;
           continue;
         }
@@ -644,17 +730,27 @@ export class Scene {
         continue;
       }
       const prevState = rec.agent.state;
+      const prevWorker = rec.agent.worker;
       rec.agent = ev.agent;
       if (prevState !== ev.agent.state) this.restyle(rec);
+      if (prevWorker !== ev.agent.worker) {
+        workersChanged = true;
+        if (!this.regroup(rec)) replan = true;
+        this.writeHi(rec);
+      }
       switch (ev.type) {
         case 'agent_woke': {
-          // Aim at the agent's running pose: it lifts while the arc flies.
+          // Aim at the agent's running pose (and, in worker view, its new
+          // cell on the worker): it lifts while the arc flies.
           const pose = this.shape.pose.running;
-          const top = new THREE.Vector3(rec.x, this.shape.top(pose.h, pose.tip) + 0.2, rec.z);
+          const dest = this.moves.get(key);
+          const x = dest ? dest.tx : rec.x;
+          const z = dest ? dest.tz : rec.z;
+          const top = new THREE.Vector3(x, this.shape.top(pose.h, pose.tip) + 0.2, z);
           const from = this.router.wake(top, now);
           const arrive = () => {
             this.flash(rec.key);
-            this.effects.ripple(rec.x, rec.z, theme.states.running, 1.4);
+            this.effects.ripple(x, z, theme.states.running, 1.4);
           };
           if (this.router.arcStyle === 'comet') this.effects.comet(from, top, theme.effects.wake, arrive);
           else this.effects.arc(from, top, theme.effects.wake, arrive);
@@ -683,7 +779,7 @@ export class Scene {
     }
     for (const l of Object.values(this.layers)) l.markDirty();
     if (replan) {
-      this.replan(false);
+      this.replan(false, this.group === 'worker');
       return;
     }
     if (workersChanged) this.rebuildWorkers();
@@ -749,37 +845,18 @@ export class Scene {
   // --------------------------------------------------------------- island
 
   buildIsland(clusterName) {
-    const g = this.islandGroup;
-    for (const child of [...g.children]) {
-      g.remove(child);
-      child.traverse?.((o) => {
-        o.geometry?.dispose();
-        for (const m of [o.material].flat()) {
-          m?.map?.dispose();
-          m?.dispose();
-        }
-        if (o.isCSS2DObject) o.element.remove();
-      });
-    }
-    const { width, depth, districts } = this.plan;
-    this.workerRowZ = depth / 2 + 3.2;
-    const islandW = width + 9;
-    const islandD = depth + 11;
-    this.island = { width: islandW, depth: islandD, cx: -1.2, cz: 2.6 };
-
-    // The slab.
-    const shape = roundedRect(islandW, islandD, 3.5);
-    const slabGeo = new THREE.ExtrudeGeometry(shape, { depth: 1.4, bevelEnabled: true, bevelThickness: 0.35, bevelSize: 0.35, bevelSegments: 3, curveSegments: 12 });
-    slabGeo.rotateX(Math.PI / 2);
-    const light = !theme.glow.additive;
-    const blend = this.blending;
-    const slab = new THREE.Mesh(slabGeo, [
-      new THREE.MeshStandardMaterial({ color: theme.island.fill, roughness: light ? 0.9 : 0.8, metalness: light ? 0 : 0.2 }),
-      new THREE.MeshStandardMaterial({ color: theme.island.side, roughness: light ? 0.9 : 0.8, metalness: light ? 0 : 0.2 }),
-    ]);
-    slab.position.set(this.island.cx, -0.4, this.island.cz);
-    slab.receiveShadow = true;
-    g.add(slab);
+    this.island = buildGround(this.islandGroup, this.plan, theme, {
+      cluster: clusterName,
+      blending: this.blending,
+      makeLabel: (cls) => {
+        const div = document.createElement('div');
+        div.className = cls;
+        return new CSS2DObject(div);
+      },
+      makeText: textPlane,
+    });
+    this.workerRowZ = this.island.rowZ;
+    const { width: islandW, depth: islandD } = this.island;
 
     // Shadows cover the island.
     const span = Math.max(islandW, islandD) * 0.75 + 6;
@@ -794,58 +871,6 @@ export class Scene {
     this.sun.target.position.set(this.island.cx, 0, this.island.cz);
     // From the front left, so shadows fall to the right where the camera sees them.
     this.sun.position.set(this.island.cx - 70, 80, this.island.cz + 35);
-
-    // Glowing rim around the top edge.
-    const rimPts = shape.getPoints(96).map((p) => new THREE.Vector3(p.x + this.island.cx, 0.0, p.y + this.island.cz));
-    rimPts.push(rimPts[0].clone());
-    const rim = new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints(rimPts),
-      new THREE.LineBasicMaterial({ color: theme.island.edge, transparent: true, opacity: theme.island.edgeAlpha, blending: blend }),
-    );
-    g.add(rim);
-
-    // Cluster name along the front edge.
-    const name = textPlane(clusterName || 'cluster', { size: 1.5, color: theme.island.label });
-    name.material.opacity = 0.75;
-    name.position.set(this.island.cx - islandW / 2 + 2.4 + name.geometry.parameters.width / 2, 0.03, this.island.cz + islandD / 2 - 1.3);
-    g.add(name);
-
-    // Districts.
-    for (const d of districts.values()) {
-      // A small per-district hue shift so neighbours read apart.
-      const jitter = (hashString(d.name) - 0.5) * theme.district.fillJitter;
-      const tileColor = new THREE.Color(theme.district.fill).offsetHSL(jitter, 0, 0);
-      const tile = new THREE.Mesh(
-        new THREE.BoxGeometry(d.w, 0.12, d.d),
-        new THREE.MeshStandardMaterial({ color: tileColor, roughness: light ? 0.9 : 0.7, metalness: light ? 0 : 0.2 }),
-      );
-      tile.position.set(d.x + d.w / 2, 0.06, d.z + d.d / 2);
-      tile.receiveShadow = true;
-      g.add(tile);
-      const edges = new THREE.LineSegments(
-        new THREE.EdgesGeometry(new THREE.BoxGeometry(d.w + 0.04, 0.16, d.d + 0.04)),
-        new THREE.LineBasicMaterial({ color: new THREE.Color(theme.district.edge).offsetHSL(jitter, 0, 0), transparent: true, opacity: theme.district.edgeAlpha, blending: blend }),
-      );
-      edges.position.copy(tile.position);
-      g.add(edges);
-      // Cell dots so empty capacity reads as "room".
-      const dots = [];
-      for (let s = 0; s < d.capacity; s++) {
-        const p = slotPosition(d, s);
-        dots.push(p.x, 0.125, p.z);
-      }
-      const dotGeo = new THREE.BufferGeometry();
-      dotGeo.setAttribute('position', new THREE.Float32BufferAttribute(dots, 3));
-      g.add(new THREE.Points(dotGeo, new THREE.PointsMaterial({ color: theme.district.dots, size: 0.12, transparent: true, opacity: 0.8 })));
-
-      const div = document.createElement('div');
-      div.className = 'district-label';
-      const label = new CSS2DObject(div);
-      label.position.set(d.x + 0.4, 0.2, d.z + 1.0);
-      label.center.set(0, 0.5);
-      g.add(label);
-      d.label = div;
-    }
 
     this.buildRouter();
   }
@@ -892,118 +917,177 @@ export class Scene {
     if (!this.plan || !this.model) return;
     const per = new Map();
     for (const rec of this.recs.values()) {
-      const c = per.get(rec.agent.atespace) || { total: 0, running: 0, crashed: 0, transition: 0, match: 0 };
+      let c = per.get(rec.group);
+      if (!c) {
+        c = { total: 0, running: 0, crashed: 0, transition: 0, suspended: 0, pending: 0, match: 0, teams: new Map() };
+        per.set(rec.group, c);
+      }
       c.total++;
-      if (rec.cls === 'running') c.running++;
-      if (rec.cls === 'crashed') c.crashed++;
-      if (rec.cls === 'transition') c.transition++;
+      c[rec.cls]++;
       if (this.filter(rec.agent)) c.match++;
-      per.set(rec.agent.atespace, c);
+      c.teams.set(rec.agent.atespace, (c.teams.get(rec.agent.atespace) || 0) + 1);
     }
+    const chip = (cls, n, text) => (n ? `<span class="chip ${cls}">${n} ${text}</span>` : '');
     for (const d of this.plan.districts.values()) {
       if (!d.label) continue;
-      const c = per.get(d.name) || { total: 0, running: 0, crashed: 0, transition: 0, match: 0 };
-      const chips = [];
-      if (c.running) chips.push(`<span class="chip running">${c.running} running</span>`);
-      if (c.transition) chips.push(`<span class="chip transition">${c.transition} changing</span>`);
-      if (c.crashed) chips.push(`<span class="chip crashed">${c.crashed} crashed</span>`);
-      d.label.innerHTML = `<div class="name">${esc(d.name)}</div><div class="meta">${c.total} agent${c.total === 1 ? '' : 's'} ${chips.join('')}</div>`;
+      const c = per.get(d.name) || { total: 0, running: 0, crashed: 0, transition: 0, suspended: 0, pending: 0, match: 0, teams: new Map() };
+      const agents = `${c.total} agent${c.total === 1 ? '' : 's'}`;
+      let html;
+      if (d.kind === 'worker') {
+        // Worker platform: name, node, fill, and the atespaces it runs
+        // (tinted like their floor tiles).
+        const wk = this.model.workers.get(d.name);
+        const cap = wk?.capacityActors;
+        const teams = [...c.teams.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, 3);
+        const chips = teams.map(([name, n]) => `<span class="chip team" style="--c:${teamCSS(this.teams.get(name) ?? 0, theme)}">${esc(name)} ${n}</span>`);
+        const state = wk?.state && wk.state !== 'ACTIVE' ? `<span class="badge">${esc(wk.state.toLowerCase())}</span>` : '';
+        html = `<div class="name">${esc(wk ? workerLabel(wk) : d.name)}${state}</div><div class="meta">${wk?.node ? `<span class="node">${esc(wk.node)}</span> · ` : ''}${cap ? `${c.total}/${cap} agents` : agents} ${chips.join('')}</div>`;
+      } else if (d.kind === 'parked') {
+        html = `<div class="name">Not on a worker</div><div class="meta">${agents} ${chip('suspended', c.suspended, 'suspended')}${chip('pending', c.pending, 'pending')}${chip('crashed', c.crashed, 'crashed')}${chip('transition', c.transition, 'changing')}</div>`;
+      } else {
+        html = `<div class="name">${esc(d.name)}</div><div class="meta">${agents} ${chip('running', c.running, 'running')}${chip('transition', c.transition, 'changing')}${chip('crashed', c.crashed, 'crashed')}</div>`;
+      }
+      if (d.label.innerHTML !== html) d.label.innerHTML = html;
       d.label.classList.toggle('dim', c.match === 0 && c.total > 0);
+      d.label.classList.toggle('focused', d.kind === 'worker' && this.focus.worker === d.name);
     }
   }
 
   // -------------------------------------------------------------- workers
 
+  /** Places and styles the worker pads, then rebuilds the links. */
   rebuildWorkers() {
     if (!this.model || !this.plan) return;
-    const list = [...this.model.workers.values()].sort((a, b) => (a.pod || a.name).localeCompare(b.pod || b.name));
-    const spacing = 4.2;
-    const perRow = Math.max(1, Math.floor((this.plan.width + 4) / spacing));
-    const want = new Set(list.map((w) => w.name));
+    const list = [...this.model.workers.values()].sort((a, b) => (a.pod || a.name).localeCompare(b.pod || b.name, undefined, { numeric: true }));
     const hosted = new Map();
     for (const rec of this.recs.values()) {
       if (rec.agent.worker) hosted.set(rec.agent.worker, (hosted.get(rec.agent.worker) || 0) + 1);
     }
-    for (const [name, w] of this.workers) {
-      if (!want.has(name)) {
-        this.world.remove(w.group);
-        w.label.element.remove();
-        this.workers.delete(name);
+    const items = [];
+    if (this.group === 'worker') {
+      // Each pad sits in its platform's label strip, at the right.
+      for (const wk of list) {
+        const d = this.plan.districts.get(wk.name);
+        if (!d) continue;
+        items.push({ worker: wk, x: d.x + d.w - PAD_W / 2 - 0.45, z: d.z + WORKER_STRIP / 2, usage: workerUsage(wk, hosted.get(wk.name) || 0) });
       }
+    } else {
+      // A row of pads along the island's front edge.
+      const spacing = 4.2;
+      const perRow = Math.max(1, Math.floor((this.plan.width + 4) / spacing));
+      list.forEach((wk, i) => {
+        const row = Math.floor(i / perRow);
+        const col = i % perRow;
+        const inRow = Math.min(perRow, list.length - row * perRow);
+        const x = this.island.cx - ((inRow - 1) * spacing) / 2 + col * spacing;
+        items.push({ worker: wk, x, z: this.workerRowZ + row * 3, usage: workerUsage(wk, hosted.get(wk.name) || 0) });
+      });
     }
-    list.forEach((wk, i) => {
-      let w = this.workers.get(wk.name);
-      if (!w) {
-        const group = new THREE.Group();
-        const pad = new THREE.Mesh(
-          new THREE.BoxGeometry(3.2, 0.3, 1.8),
-          new THREE.MeshStandardMaterial({ roughness: 0.45, metalness: 0.5 }),
-        );
-        pad.position.y = 0.15;
-        pad.castShadow = true;
-        pad.receiveShadow = true;
-        group.add(pad);
-        const padEdges = new THREE.LineSegments(
-          new THREE.EdgesGeometry(new THREE.BoxGeometry(3.24, 0.32, 1.84)),
-          new THREE.LineBasicMaterial({ transparent: true, opacity: 0.55 }),
-        );
-        padEdges.position.y = 0.15;
-        group.add(padEdges);
-        const glow = new THREE.Mesh(
-          new THREE.PlaneGeometry(2.8, 1.4),
-          new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.0, depthWrite: false }),
-        );
-        glow.rotation.x = -Math.PI / 2;
-        glow.position.y = 0.31;
-        group.add(glow);
-        const div = document.createElement('div');
-        div.className = 'worker-label';
-        const label = new CSS2DObject(div);
-        label.position.set(0, 0.2, 1.75);
-        group.add(label);
-        this.world.add(group);
-        w = { group, pad, padEdges, glow, label };
-        this.workers.set(wk.name, w);
-      }
-      const row = Math.floor(i / perRow);
-      const col = i % perRow;
-      const inRow = Math.min(perRow, list.length - row * perRow);
-      const x = this.island.cx - ((inRow - 1) * spacing) / 2 + col * spacing;
-      const z = this.workerRowZ + row * 3;
-      w.group.position.set(x, 0, z);
-      const running = hosted.get(wk.name) || 0;
-      const light = !theme.glow.additive;
-      w.pad.material.color.set(running ? theme.worker.pad : theme.worker.idle);
-      w.pad.material.roughness = light ? 0.85 : 0.45;
-      w.pad.material.metalness = light ? 0 : 0.5;
-      w.padEdges.material.color.set(theme.worker.padEdge);
-      w.padEdges.material.blending = this.blending;
-      w.glow.material.blending = this.blending;
-      w.glow.material.opacity = running ? (0.06 + Math.min(running, 8) * 0.02) * (light ? 2.5 : 1) : 0.0;
-      w.glow.material.color.set(wk.state === 'DRAINING' ? theme.worker.draining : theme.worker.active);
-      w.name = wk.name;
-      w.state = wk.state;
-      w.label.visible = false;
-      w.label.element.innerHTML = `<div class="name">${esc(workerLabel(wk))}</div><div class="meta">${running} actor${running === 1 ? '' : 's'}${wk.state && wk.state !== 'ACTIVE' ? ' · ' + esc(wk.state.toLowerCase()) : ''}</div>`;
-      w.pos = new THREE.Vector3(x, 0.32, z);
-    });
-    this.rebuildWorkerLines();
+    this.pads.sync(items, theme, this.blending, { cardAbove: this.group === 'worker' });
+    this.pads.setFocus(this.focus);
+    this.relinkAll();
   }
 
-  rebuildWorkerLines() {
-    const pts = [];
-    for (const rec of this.recs.values()) {
-      const wk = rec.agent.worker && this.workers.get(rec.agent.worker);
-      if (!wk || !wk.pos) continue;
-      pts.push(rec.x, this.topOf(rec), rec.z, wk.pos.x, wk.pos.y, wk.pos.z);
+  /** How busy an agent's link looks: 0 idle to 1 serving (more, faster dots). */
+  linkRate(rec) {
+    if (rec.cls !== 'running') return 0;
+    if (this.serving(rec)) return 1;
+    return this.fake.value > 0 ? ((rec.seed * 5.31) % 1) * 0.45 : 0.15;
+  }
+
+  /** Adds, moves or drops an agent's link to its worker's pad. */
+  updateLink(rec) {
+    const pad = rec.agent.worker && this.pads.get(rec.agent.worker);
+    if (!pad) {
+      this.links.remove(rec.key);
+      return;
     }
-    const g = this.workerLines.geometry;
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-    // Many lines add up; keep the bundle faint as it grows.
-    const n = pts.length / 6;
+    const level = levelOf(this.focus, rec.agent.worker);
+    this.links.set(rec.key, { x: rec.x, y: this.topOf(rec), z: rec.z }, pad.pos, level, this.linkRate(rec), (rec.seed * 3.7) % 1);
+  }
+
+  relinkAll() {
+    this.links.clear();
+    for (const rec of this.recs.values()) if (rec.agent.worker) this.updateLink(rec);
+    this.styleLinks();
+  }
+
+  /** Link colors and alpha: many arcs add up, so the bundle gets fainter as it grows. */
+  styleLinks() {
+    const n = Math.max(this.links.count, 1);
     const a = theme.links.alpha;
-    this.workerLines.material.opacity = Math.min(a, Math.max(a * 0.15, a * Math.sqrt(12 / Math.max(n, 1))));
-    g.computeBoundingSphere();
+    this.links.setLook({
+      color: theme.links.color,
+      highlight: theme.links.highlight,
+      flow: theme.links.flow,
+      restAlpha: Math.min(a, Math.max(a * 0.35, a * Math.sqrt(30 / n))),
+      focusAlpha: theme.links.focusAlpha,
+      dotAlpha: Math.min(0.85, Math.max(0.35, Math.sqrt(60 / n))) * (theme.glow.additive ? 1 : 0.85),
+      blending: this.blending,
+    });
+  }
+
+  // ------------------------------------------------------------ highlight
+
+  /** Writes an agent's highlight level (its worker may have changed). */
+  writeHi(rec) {
+    const layer = this.layers[rec.cls];
+    layer.hi.array[rec.slot] = levelOf(this.focus, rec.agent.worker);
+    layer.markDirty();
+  }
+
+  /** Recomputes the worker in focus; repaints agents, links and pads when it changed. */
+  refreshFocus() {
+    const f = focusOf(this.hl, (key) => this.recs.get(key)?.agent.worker);
+    if (sameFocus(f, this.focus)) return;
+    this.focus = f;
+    for (const rec of this.recs.values()) {
+      const lv = levelOf(f, rec.agent.worker);
+      const layer = this.layers[rec.cls];
+      if (layer.hi.array[rec.slot] !== lv) {
+        layer.hi.array[rec.slot] = lv;
+        layer.markDirty();
+      }
+      if (rec.agent.worker) this.links.setLevel(rec.key, lv);
+    }
+    this.pads.setFocus(f);
+    this.updateDistrictLabels();
+    this.lastLabelUpdate = -1;
+    this.handlers.onFocus?.(f);
+  }
+
+  /** Pins a worker (clicked pad, or "show worker"); null unpins. */
+  pinWorker(name) {
+    this.hl.pinnedWorker = name || null;
+    this.refreshFocus();
+  }
+
+  get pinnedWorker() {
+    return this.hl.pinnedWorker;
+  }
+
+  /** Smoothly moves the camera to look at a worker's pad (or platform). */
+  flyToWorker(name) {
+    const pad = this.pads.get(name);
+    if (!pad) return;
+    const d = this.group === 'worker' && this.plan.districts.get(name);
+    const target = d ? new THREE.Vector3(d.x + d.w / 2, 0.5, d.z + d.d / 2) : pad.pos.clone();
+    const dir = this.camera.position.clone().sub(this.controls.target).normalize();
+    const dist = Math.max(Math.min(this.camera.position.distanceTo(this.controls.target), 60), 40);
+    this.flyAnim = { t0: this.time.value, dur: 0.9, fromT: this.controls.target.clone(), toT: target, fromC: this.camera.position.clone(), toC: target.clone().add(dir.multiplyScalar(dist)) };
+  }
+
+  // -------------------------------------------------------------- grouping
+
+  /** Switches between atespace and worker districts; agents glide to their new cells. */
+  setGroup(mode) {
+    mode = groupId(mode);
+    if (mode === this.group) return;
+    this.group = mode;
+    if (!this.model) return;
+    this.replan(false, true);
+    if (this.selected && this.recs.has(this.selected)) this.flyTo(this.selected);
+    else this.fitCamera(true);
   }
 
   // --------------------------------------------------------------- camera
@@ -1013,7 +1097,8 @@ export class Scene {
     this.leftInset = px;
   }
 
-  fitCamera() {
+  /** Frames the whole island; smooth: fly there instead of jumping. */
+  fitCamera(smooth = false) {
     // Frame the island in the part of the view the events panel leaves
     // free: pull back to fit the narrower width and shift the target left
     // so the island (and the router tower on its left edge) clears the panel.
@@ -1026,8 +1111,15 @@ export class Scene {
     // Aim a little toward the front edge when pulled back, so the island
     // uses the empty sky above it.
     const cz = this.island.cz + 0.5 + (inset ? this.island.depth * 0.05 : 0);
-    this.controls.target.set(cx, 0, cz);
-    this.camera.position.set(cx + dist * 0.1, dist * 0.56, cz + dist * 0.84);
+    const toT = new THREE.Vector3(cx, 0, cz);
+    const toC = new THREE.Vector3(cx + dist * 0.1, dist * 0.56, cz + dist * 0.84);
+    if (smooth) {
+      this.flyAnim = { t0: this.time.value, dur: 0.9, fromT: this.controls.target.clone(), toT, fromC: this.camera.position.clone(), toC };
+      return;
+    }
+    this.flyAnim = null;
+    this.controls.target.copy(toT);
+    this.camera.position.copy(toC);
     this.controls.update();
   }
 
@@ -1040,15 +1132,19 @@ export class Scene {
     // With the side panel open, aim right of the agent so it sits left of
     // center, clear of the panel.
     const right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize().multiplyScalar(-dist * 0.18);
-    const target = new THREE.Vector3(rec.x, 0.8, rec.z).add(right);
+    // Where the agent is going, if it is moving between layouts.
+    const mv = this.moves.get(key);
+    const target = new THREE.Vector3(mv ? mv.tx : rec.x, 0.8, mv ? mv.tz : rec.z).add(right);
     const camTo = target.clone().add(dir.multiplyScalar(dist));
     this.flyAnim = { t0: this.time.value, dur: 0.9, fromT: this.controls.target.clone(), toT: target, fromC: this.camera.position.clone(), toC: camTo };
   }
 
   select(key) {
     this.selected = key;
+    this.hl.selectedAgent = key;
     this.lastLabelUpdate = -1;
     this.updateMarker();
+    this.refreshFocus();
   }
 
   updateMarker() {
@@ -1077,7 +1173,8 @@ export class Scene {
       down = null;
       if (moved > 5) return;
       const key = this.pick(e.clientX, e.clientY);
-      this.handlers.onPick?.(key);
+      const worker = key ? null : this.pickWorker(e.clientX, e.clientY);
+      this.handlers.onPick?.(key, worker);
     });
     el.addEventListener('pointermove', (e) => {
       if (down) return;
@@ -1086,6 +1183,7 @@ export class Scene {
     el.addEventListener('pointerleave', () => {
       this.hoverAt = null;
       this.setHover(null);
+      this.setHoverWorker(null);
     });
   }
 
@@ -1103,15 +1201,11 @@ export class Scene {
 
   /** The worker pad under the pointer, by worker name. */
   pickWorker(clientX, clientY) {
-    if (!this.hoverAt) return null;
     const r = this.renderer.domElement.getBoundingClientRect();
     this.pointer.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    const pads = [...this.workers.values()].map((w) => w.pad);
-    const hit = this.raycaster.intersectObjects(pads, false)[0];
-    if (!hit) return null;
-    for (const [name, w] of this.workers) if (w.pad === hit.object) return name;
-    return null;
+    const hit = this.raycaster.intersectObjects(this.pads.pickable(), false)[0];
+    return hit ? hit.object.userData.worker : null;
   }
 
   setHover(key, x, y) {
@@ -1120,8 +1214,17 @@ export class Scene {
       const rec = key && this.recs.get(key);
       this.hoverRing.visible = !!rec;
       if (rec) this.hoverRing.position.set(rec.x, 0.15, rec.z);
+      this.hl.hoverAgent = key || null;
+      this.refreshFocus();
     }
     this.handlers.onHover?.(key, x, y);
+  }
+
+  setHoverWorker(name) {
+    if (name === this.hl.hoverWorker) return;
+    this.hl.hoverWorker = name || null;
+    this.refreshFocus();
+    this.handlers.onHoverWorker?.(name);
   }
 
   // ---------------------------------------------------------------- frame
@@ -1132,8 +1235,25 @@ export class Scene {
     this.time.value += dt;
     const t = this.time.value;
 
+    // Layout moves (a grouping change, or an agent changing worker).
+    for (const [key, mv] of this.moves) {
+      const rec = this.recs.get(key);
+      if (!rec) {
+        this.moves.delete(key);
+        continue;
+      }
+      const k = Math.min(Math.max((t - mv.t0) / mv.dur, 0), 1);
+      const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+      rec.x = mv.fx + (mv.tx - mv.fx) * e;
+      rec.z = mv.fz + (mv.tz - mv.fz) * e;
+      if (!this.anims.has(key)) this.writeMatrix(rec);
+      if (rec.agent.worker) this.links.setFrom(key, rec.x, this.topOf(rec), rec.z);
+      if (key === this.selected) this.updateMarker();
+      if (key === this.hovered) this.hoverRing.position.set(rec.x, 0.15, rec.z);
+      if (k >= 1) this.moves.delete(key);
+    }
+
     // Height animations.
-    let linesDirty = false;
     for (const [key, an] of this.anims) {
       const rec = this.recs.get(key);
       if (!rec) {
@@ -1145,12 +1265,20 @@ export class Scene {
       rec.h = an.fromH + (an.toH - an.fromH) * e;
       rec.tip = an.fromTip + (an.toTip - an.fromTip) * e;
       this.writeMatrix(rec);
-      if (rec.agent.worker) linesDirty = true;
+      if (rec.agent.worker) this.links.setFrom(key, rec.x, this.topOf(rec), rec.z);
       if (key === this.selected) this.updateMarker();
       if (k >= 1) this.anims.delete(key);
     }
-    if (linesDirty) this.rebuildWorkerLines();
     this.agents.flush();
+
+    // Atespace tiles fade in with the worker view; links fade with a focus.
+    const ease = 1 - Math.exp(-dt * 8);
+    const team = this.group === 'worker' ? theme.team.alpha : 0;
+    this.look.uTeam.value += (team - this.look.uTeam.value) * ease;
+    if (Math.abs(team - this.look.uTeam.value) < 0.002) this.look.uTeam.value = team;
+    const fu = this.links.uniforms.uFocus;
+    fu.value += ((this.focus.worker ? 1 : 0) - fu.value) * ease;
+    this.links.flush();
 
     // Fly-to.
     if (this.flyAnim) {
@@ -1176,11 +1304,7 @@ export class Scene {
       this.lastHoverPick = t;
       const key = this.pick(this.hoverAt.x, this.hoverAt.y);
       this.setHover(key, this.hoverAt.x, this.hoverAt.y);
-      const pad = key ? null : this.pickWorker(this.hoverAt.x, this.hoverAt.y);
-      if (pad !== this.hoverWorker) {
-        this.hoverWorker = pad;
-        this.lastLabelUpdate = -1;
-      }
+      this.setHoverWorker(key ? null : this.pickWorker(this.hoverAt.x, this.hoverAt.y));
     }
 
     if (t - this.lastLabelUpdate > 0.25) {
@@ -1196,19 +1320,21 @@ export class Scene {
   }
 
   /**
-   * Worker pad labels are quiet like agent labels: shown for the hovered
-   * pad, the selected agent's pad, pads that aren't plainly active (for
-   * example draining), and every pad when the camera is close to it or
-   * labels are 'all'. They are placed greedily in screen space after the
-   * district and agent labels and never overlap them or each other.
+   * Worker pad labels are quiet like agent labels: shown for the worker in
+   * focus (a card when it is hovered or pinned), pads that aren't plainly
+   * active (for example draining), and every pad when the camera is close to
+   * it or labels are 'all'. In worker view the platforms carry the names, so
+   * only the focused pad's card shows. They are placed greedily in screen
+   * space after the district and agent labels and never overlap them or
+   * each other (a card always shows).
    */
   layoutWorkerLabels() {
-    if (!this.workers.size) return;
+    if (!this.pads.pads.size) return;
     const W = this.renderer.domElement.clientWidth;
     const H = this.renderer.domElement.clientHeight;
     const cam = this.camera.position;
     const mode = this.labelMode;
-    const host = this.selected && this.recs.get(this.selected)?.agent.worker;
+    const byWorker = this.group === 'worker';
     const placed = [];
     const obstacle = (el) => {
       const r = el.getBoundingClientRect();
@@ -1218,28 +1344,34 @@ export class Scene {
     if (this.plan) for (const d of this.plan.districts.values()) if (d.label && !d.label.classList.contains('crowded')) obstacle(d.label);
     const items = [];
     const wp = new THREE.Vector3();
-    for (const [name, w] of this.workers) {
-      w.label.getWorldPosition(wp);
-      const notable = !!w.state && w.state !== 'ACTIVE';
-      const prio = name === this.hoverWorker ? 0 : name === host ? 1 : notable ? 2 : 3;
+    for (const [name, p] of this.pads.pads) {
+      p.label.getWorldPosition(wp);
+      const focused = name === this.focus.worker;
+      const card = focused && this.focus.strong;
+      const notable = !!p.worker.state && p.worker.state !== 'ACTIVE';
+      const prio = card ? 0 : focused ? 1 : notable ? 2 : 3;
       const near = cam.distanceTo(wp) < WORKER_LABEL_DISTANCE;
-      const want = prio === 0 || (mode !== 'off' && (prio < 3 || near || mode === 'all'));
-      w.label.visible = false;
-      if (want) items.push({ w, prio, d: cam.distanceTo(wp), p: wp.clone() });
+      const want = card || (!byWorker && mode !== 'off' && (prio < 3 || near || mode === 'all'));
+      p.label.visible = false;
+      if (want) items.push({ p, prio, d: cam.distanceTo(wp), at: wp.clone() });
     }
     items.sort((a, b) => a.prio - b.prio || a.d - b.d);
-    for (const { w, p } of items) {
-      p.project(this.camera);
-      if (p.z > 1) continue;
-      const x = (p.x * 0.5 + 0.5) * W;
-      const y = (-p.y * 0.5 + 0.5) * H;
+    for (const { p, prio, at } of items) {
+      at.project(this.camera);
+      if (at.z > 1) continue;
+      if (prio === 0) {
+        p.label.visible = true;
+        continue;
+      }
+      const x = (at.x * 0.5 + 0.5) * W;
+      const y = (-at.y * 0.5 + 0.5) * H;
       // Estimated from the text: the element isn't laid out while hidden.
-      const chars = Math.max(4, ...[...w.label.element.children].map((c) => c.textContent.length));
+      const chars = Math.max(4, ...[...p.label.element.children].map((c) => c.textContent.length));
       const half = chars * 3.2 + 6;
       const box = { x0: x - half, x1: x + half, y0: y - 15, y1: y + 15 };
       if (placed.some((b) => box.x0 < b.x1 && box.x1 > b.x0 && box.y0 < b.y1 && box.y1 > b.y0)) continue;
       placed.push(box);
-      w.label.visible = true;
+      p.label.visible = true;
     }
   }
 

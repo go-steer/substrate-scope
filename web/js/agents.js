@@ -20,6 +20,8 @@
 //     pool under running agents (dark themes), a contact shadow under
 //     suspended orbs;
 //   - rising particles over agents that are serving a request.
+// Every layer also draws a floor tile tinted by the agent's atespace, shown
+// only in worker view (so "which team runs here" stays answerable there).
 // Pure three.js (no DOM, no renderer), so node tests can build and dispose it.
 
 import * as THREE from 'three';
@@ -41,6 +43,7 @@ const agentVertex = /* glsl */ `
 attribute float aSeed;
 attribute float aDim;
 attribute float aFlash;
+attribute float aHi;
 uniform float uTime;
 uniform float uBob;
 uniform float uSpin;
@@ -56,6 +59,7 @@ varying float vY;
 varying float vDim;
 varying float vFlash;
 varying float vSeed;
+varying float vHi;
 void main() {
   vec3 p = position;
   vec3 nrm = normal;
@@ -91,6 +95,7 @@ void main() {
   float age = uTime - aFlash;
   vFlash = (aFlash > 0.0 && age >= 0.0) ? exp(-age * 1.6) : 0.0;
   vSeed = aSeed;
+  vHi = aHi;
   gl_Position = projectionMatrix * viewMatrix * wp;
 }`;
 
@@ -117,6 +122,7 @@ uniform float uInk;
 uniform float uOcc;
 uniform float uAdditive;
 uniform vec3 uDimColor;
+uniform float uHiDim;
 varying vec3 vNormal;
 varying vec3 vColor;
 varying vec3 vWorld;
@@ -126,6 +132,7 @@ varying float vY;
 varying float vDim;
 varying float vFlash;
 varying float vSeed;
+varying float vHi;
 void main() {
   vec3 n = normalize(vNormal);
   vec3 V = normalize(cameraPosition - vWorld);
@@ -186,7 +193,16 @@ void main() {
   col = mix(col, vec3(1.0), uGloss * (smoothstep(0.7, 1.0, n.y) * 0.8 + fr * uRim * 2.0));
 #endif
   col = mix(col, col * 0.42, rim * uInk);
-  col = mix(col, uDimColor, vDim * 0.9);
+  // Worker focus: lit agents (2) glow, siblings (1) a little, others (-1) recede.
+  float hi = vHi > 1.5 ? 1.0 : (vHi > 0.5 ? 0.4 : 0.0);
+  float shimmer = 0.75 + 0.25 * sin(uTime * 3.0 + vSeed * 6.2831);
+  // Dark themes: lit agents glow brighter. Light themes: they deepen to
+  // their full state color (brightening would wash out on a pale ground).
+  vec3 glowUp = col + (vColor * 0.7 + 0.1) * hi * shimmer;
+  vec3 deepen = mix(col, vColor * 0.92, 0.65 * hi);
+  col = mix(deepen, glowUp, uAdditive);
+  float dim = max(vDim * 0.9, vHi < -0.5 ? uHiDim : 0.0);
+  col = mix(col, uDimColor, dim);
   gl_FragColor = vec4(col, 1.0);
 }`;
 
@@ -196,6 +212,7 @@ attribute float aSeed;
 attribute float aDim;
 attribute float aIdle;
 attribute float aServe;
+attribute float aHi;
 uniform float uTime;
 uniform float uIdleFake;
 varying vec2 vUv;
@@ -214,7 +231,7 @@ void main() {
   float idle = aIdle;
   if (uIdleFake > 0.5) idle = aServe > 0.5 ? 1.0 : 1.0 - fract(aIdle + uTime / ${FAKE_IDLE_SECONDS.toFixed(1)});
   vIdle = idle;
-  vDim = aDim;
+  vDim = max(aDim, aHi < -0.5 ? 0.8 : 0.0);
   gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
 }`;
 
@@ -260,6 +277,7 @@ const sparkVertex = /* glsl */ `
 attribute float aSeed;
 attribute float aDim;
 attribute float aServe;
+attribute float aHi;
 uniform float uTime;
 uniform float uCrown;
 uniform float uBob;
@@ -267,7 +285,7 @@ varying vec2 vC;
 varying float vA;
 varying vec3 vColor;
 void main() {
-  if (aServe < 0.5 || aDim > 0.5) {
+  if (aServe < 0.5 || aDim > 0.5 || aHi < -0.5) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     return;
   }
@@ -303,6 +321,56 @@ void main() {
   gl_FragColor = vec4(mix(vColor, vec3(1.0), uWhite) * uBright, vA * (1.0 - d * d));
 }`;
 
+// Atespace tile: a rounded square under the agent, tinted by its atespace's
+// hue (aTeam: the hue, plus 2 when parked; -1 for none), faded in with uTeam
+// in worker view.
+const tileVertex = /* glsl */ `
+attribute float aTeam;
+attribute float aDim;
+attribute float aHi;
+uniform float uTeam;
+uniform float uTeamSat;
+uniform float uTeamLight;
+varying vec2 vUv;
+varying vec3 vTint;
+varying float vA;
+vec3 hsl2rgb(float h, float s, float l) {
+  vec3 k = clamp(abs(mod(h * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+  return l + s * (k - 0.5) * (1.0 - abs(2.0 * l - 1.0));
+}
+void main() {
+  if (uTeam < 0.005 || aTeam < 0.0) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
+  vec4 c = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+  vec3 wp = vec3(c.x + position.x, 0.128, c.z + position.z);
+  vUv = uv;
+  // aTeam >= 2: parked (no worker), drawn fainter so platforms lead.
+  float parked = step(2.0, aTeam);
+  vTint = hsl2rgb(fract(aTeam), uTeamSat, uTeamLight);
+  vA = uTeam * (1.0 - aDim * 0.8) * (aHi < -0.5 ? 0.35 : 1.0) * (1.0 - 0.55 * parked);
+  gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
+}`;
+
+const tileFragment = /* glsl */ `
+varying vec2 vUv;
+varying vec3 vTint;
+varying float vA;
+void main() {
+  vec2 q = abs(vUv * 2.0 - 1.0) - 0.62;
+  float d = length(max(q, 0.0)) - 0.3;
+  float a = vA * (1.0 - smoothstep(-0.04, 0.03, d));
+  if (a < 0.004) discard;
+  gl_FragColor = vec4(vTint, a);
+}`;
+
+function tileGeometry() {
+  const g = new THREE.PlaneGeometry(1.32, 1.32);
+  g.rotateX(-Math.PI / 2);
+  return g;
+}
+
 function decalGeometry() {
   const g = new THREE.PlaneGeometry(2.2, 2.2);
   g.rotateX(-Math.PI / 2);
@@ -324,7 +392,7 @@ function particleGeometry() {
 }
 
 /** Per-instance float attributes every layer keeps (and its extras share). */
-const ATTRS = ['aSeed', 'aDim', 'aFlash', 'aIdle', 'aServe'];
+const ATTRS = ['aSeed', 'aDim', 'aFlash', 'aIdle', 'aServe', 'aHi', 'aTeam'];
 
 /** One InstancedMesh per visual class, with slots that can be added and removed. */
 export class Layer {
@@ -409,6 +477,18 @@ export class Layer {
         mesh: null,
       };
     }
+    // The atespace tile: always built, not an extra (x doesn't hide it).
+    this.tile = {
+      geometry: tileGeometry(),
+      material: new THREE.ShaderMaterial({
+        vertexShader: tileVertex,
+        fragmentShader: tileFragment,
+        transparent: true,
+        depthWrite: false,
+        uniforms: { uTeam: look.uTeam || { value: 0 }, uTeamSat: look.uTeamSat || { value: 0.5 }, uTeamLight: look.uTeamLight || { value: 0.5 } },
+      }),
+      mesh: null,
+    };
     this.keys = [];
     this.capacity = 0;
     this.mesh = null;
@@ -417,9 +497,14 @@ export class Layer {
     this.allocate(64);
   }
 
-  /** The decal and particle parts that exist. */
+  /** The decal and particle parts that exist (the ones x toggles). */
   extras() {
     return [this.decal, this.particles].filter(Boolean);
+  }
+
+  /** Every part that shares this layer's instance buffers. */
+  parts() {
+    return [...this.extras(), this.tile];
   }
 
   allocate(cap) {
@@ -451,7 +536,7 @@ export class Layer {
     this.mesh = mesh;
     this.capacity = cap;
     this.parent.add(mesh);
-    for (const x of this.extras()) {
+    for (const x of this.parts()) {
       if (x.mesh) {
         this.parent.remove(x.mesh);
         x.mesh.dispose();
@@ -463,7 +548,7 @@ export class Layer {
       for (const name of ATTRS) x.geometry.setAttribute(name, attrs[name]);
       em.count = mesh.count;
       em.frustumCulled = false;
-      em.renderOrder = 2;
+      em.renderOrder = x === this.tile ? 1 : 2;
       em.visible = x.visible !== false;
       x.mesh = em;
       this.parent.add(em);
@@ -479,6 +564,12 @@ export class Layer {
   }
   get flash() {
     return this.attrs.aFlash;
+  }
+  get hi() {
+    return this.attrs.aHi;
+  }
+  get team() {
+    return this.attrs.aTeam;
   }
 
   add(key) {
@@ -515,7 +606,7 @@ export class Layer {
 
   setCount() {
     this.mesh.count = this.keys.length;
-    for (const x of this.extras()) x.mesh.count = this.keys.length;
+    for (const x of this.parts()) x.mesh.count = this.keys.length;
   }
 
   markDirty() {
@@ -532,14 +623,14 @@ export class Layer {
   }
 
   dispose() {
-    for (const m of [this.mesh, ...this.extras().map((x) => x.mesh)]) {
+    for (const m of [this.mesh, ...this.parts().map((x) => x.mesh)]) {
       if (!m) continue;
       this.parent.remove(m);
       m.dispose();
     }
     this.geometry.dispose();
     this.material.dispose();
-    for (const x of this.extras()) {
+    for (const x of this.parts()) {
       x.geometry.dispose();
       x.material.dispose();
     }

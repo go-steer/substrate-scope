@@ -83,10 +83,25 @@ func ToWorker(w *ateapipb.Worker, assignments []*ateapipb.ActorAssignment) model
 		CapacityActors:  w.GetStatus().GetCapacity().GetActors(),
 		AllocatedActors: w.GetStatus().GetAllocated().GetActors(),
 	}
+	out.CapacityCPU, out.CapacityMemory = limits(w.GetStatus().GetCapacity().GetResources())
+	out.AllocatedCPU, out.AllocatedMemory = limits(w.GetStatus().GetAllocated().GetResources())
 	for _, as := range assignments {
 		out.Actors = append(out.Actors, model.Key(as.GetActor().GetAtespace(), as.GetActor().GetName()))
 	}
 	return out
+}
+
+// limits returns the cpu and memory quantities of a resource list.
+func limits(r *ateapipb.Resources) (cpu, memory string) {
+	for _, l := range r.GetLimits() {
+		switch l.GetName() {
+		case "cpu":
+			cpu = l.GetQuantity()
+		case "memory":
+			memory = l.GetQuantity()
+		}
+	}
+	return cpu, memory
 }
 
 // ToAtespace converts a Substrate atespace.
