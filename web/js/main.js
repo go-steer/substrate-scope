@@ -21,7 +21,7 @@ import { Scene, cssColor } from './scene.js';
 import { Panel } from './panel.js';
 import { esc, duration, since, clock, workerLabel } from './format.js';
 import { describe } from './feed.js';
-import { SyntheticStream, syntheticDetail } from './synth.js';
+import { SyntheticStream, syntheticDetail, syntheticOptions } from './synth.js';
 import { ThemePicker } from './theming.js';
 import { LookPicker, initialLooks, rememberGroup } from './looks.js';
 import { inkOn } from './themes.js';
@@ -121,7 +121,7 @@ const streamHandlers = {
     return true;
   },
 };
-const stream = synthetic > 0 ? new SyntheticStream(synthetic, streamHandlers) : new Stream(streamURL(), streamHandlers);
+const stream = synthetic > 0 ? new SyntheticStream(synthetic, streamHandlers, syntheticOptions(new URLSearchParams(window.location.search))) : new Stream(streamURL(), streamHandlers);
 
 function initialSelection() {
   const m = /[#&]agent=([^&]+)/.exec(window.location.hash);
