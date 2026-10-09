@@ -3,7 +3,7 @@ module github.com/go-steer/substrate-scope
 go 1.27.0
 
 require (
-	github.com/agent-substrate/substrate v0.3.0
+	github.com/agent-substrate/substrate v0.4.0
 	github.com/coder/websocket v1.8.15
 	golang.org/x/sync v0.23.0
 	google.golang.org/grpc v1.83.2

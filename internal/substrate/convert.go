@@ -63,7 +63,13 @@ func ToAgent(a *ateapipb.Actor) model.Agent {
 		out.WorkerPod = wa.GetWorkerPod()
 		out.WorkerNode = wa.GetNodeName()
 		out.WorkerPool = wa.GetWorkerPool()
+		out.WorkerIPs = nonEmpty(wa.GetWorkerPodIps())
+		if len(out.WorkerIPs) > 0 {
+			out.WorkerIP = out.WorkerIPs[0]
+		}
+		out.WorkerEpoch = wa.GetWorkerEpoch()
 	}
+	out.AssignedNode = st.GetAssignedNode()
 	if c := st.GetCrash(); c != nil {
 		out.Crash = &model.Crash{Message: c.GetMessage(), Time: ts(c.GetCrashTime())}
 	}
@@ -82,11 +88,26 @@ func ToWorker(w *ateapipb.Worker, assignments []*ateapipb.ActorAssignment) model
 		State:           strings.TrimPrefix(w.GetStatus().GetState().String(), "WORKER_STATE_"),
 		CapacityActors:  w.GetStatus().GetCapacity().GetActors(),
 		AllocatedActors: w.GetStatus().GetAllocated().GetActors(),
+		IPs:             nonEmpty(w.GetIps()),
+		Epoch:           w.GetEpoch(),
+		ObservedEpoch:   w.GetStatus().GetObservedEpoch(),
 	}
 	out.CapacityCPU, out.CapacityMemory = limits(w.GetStatus().GetCapacity().GetResources())
 	out.AllocatedCPU, out.AllocatedMemory = limits(w.GetStatus().GetAllocated().GetResources())
 	for _, as := range assignments {
 		out.Actors = append(out.Actors, model.Key(as.GetActor().GetAtespace(), as.GetActor().GetName()))
+	}
+	return out
+}
+
+// nonEmpty returns the non-empty strings of ss, nil when there are none (so
+// unchanged workers and actors stay reflect.DeepEqual across polls).
+func nonEmpty(ss []string) []string {
+	var out []string
+	for _, s := range ss {
+		if s != "" {
+			out = append(out, s)
+		}
 	}
 	return out
 }

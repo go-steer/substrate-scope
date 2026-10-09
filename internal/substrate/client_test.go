@@ -18,10 +18,13 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // fakeAPI serves n actors in pages of the requested size.
@@ -30,10 +33,14 @@ type fakeAPI struct {
 	actors   int
 	calls    int
 	badToken bool
+	err      error
 }
 
 func (f *fakeAPI) ListActors(_ context.Context, in *ateapipb.ListActorsRequest, _ ...grpc.CallOption) (*ateapipb.ListActorsResponse, error) {
 	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
 	start := 0
 	if in.GetPageToken() != "" {
 		var err error
@@ -74,6 +81,22 @@ func TestListActorsPaginates(t *testing.T) {
 	}
 }
 
+// With Substrate v0.4 authorization enforced and no grant, the error says
+// what to grant and keeps its gRPC code.
+func TestPermissionDeniedExplained(t *testing.T) {
+	denied := status.Error(codes.PermissionDenied, `permission denied: principal "user:system%3Aserviceaccount%3Asubstrate-scope%3Asubstrate-scope" lacks "can_list_actors" on "atespace:x"`)
+	c := newClient(&fakeAPI{err: denied})
+	_, err := c.ListActors(context.Background(), "x")
+	if status.Code(err) != codes.PermissionDenied || !strings.Contains(err.Error(), "global viewer") {
+		t.Fatalf("err = %v", err)
+	}
+	other := status.Error(codes.Unavailable, "down")
+	_, err = newClient(&fakeAPI{err: other}).ListActors(context.Background(), "x")
+	if strings.Contains(err.Error(), "viewer") {
+		t.Fatalf("non-authz error got the hint: %v", err)
+	}
+}
+
 func TestListActorsStopsOnRepeatedToken(t *testing.T) {
 	f := &fakeAPI{actors: 1000, badToken: true}
 	c := newClient(f)
@@ -88,13 +111,29 @@ func TestToAgent(t *testing.T) {
 		Metadata:      &ateapipb.ResourceMetadata{Atespace: "cred-test", Name: "mast-triage", Uid: "u1"},
 		ActorTemplate: &ateapipb.ObjectRef{Atespace: "cred-test", Name: "ax-mast-triage"},
 		Status: &ateapipb.ActorStatus{
-			State:            ateapipb.ActorState_ACTOR_STATE_RUNNING,
-			WorkerAssignment: &ateapipb.WorkerAssignment{Worker: &ateapipb.ObjectRef{Name: "w-1"}, WorkerPod: "atelet-abc", NodeName: "node-1"},
+			State: ateapipb.ActorState_ACTOR_STATE_RUNNING,
+			WorkerAssignment: &ateapipb.WorkerAssignment{
+				Worker: &ateapipb.ObjectRef{Name: "w-1"}, WorkerPod: "atelet-abc", NodeName: "node-1",
+				WorkerPodIps: []string{"", "10.0.0.7", "fd00::7"}, WorkerEpoch: 2,
+			},
+			AssignedNode:     "node-1",
 			ExternalSnapshot: &ateapipb.ExternalSnapshot{SnapshotUri: "gs://b/s"},
 		},
 	})
 	if a.State != "RUNNING" || a.Worker != "w-1" || a.WorkerPod != "atelet-abc" || a.Template != "cred-test/ax-mast-triage" || a.SnapshotURI != "gs://b/s" {
 		t.Fatalf("ToAgent = %+v", a)
+	}
+	if a.WorkerIP != "10.0.0.7" || len(a.WorkerIPs) != 2 || a.WorkerIPs[1] != "fd00::7" || a.WorkerEpoch != 2 || a.AssignedNode != "node-1" {
+		t.Fatalf("ToAgent worker IPs/epoch/node = %+v", a)
+	}
+	// PAUSED: no worker, but still attached to the node holding its local
+	// snapshot.
+	a = ToAgent(&ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: "x", Name: "p"},
+		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_PAUSED, AssignedNode: "node-2"},
+	})
+	if a.State != "PAUSED" || a.Worker != "" || a.WorkerIP != "" || a.WorkerIPs != nil || a.AssignedNode != "node-2" {
+		t.Fatalf("ToAgent paused = %+v", a)
 	}
 }
 
@@ -106,10 +145,13 @@ func TestToWorker(t *testing.T) {
 		Metadata:  &ateapipb.ResourceMetadata{Name: "w-1"},
 		WorkerPod: "atelet-abc",
 		NodeName:  "node-1",
+		Ips:       []string{"10.0.0.7"},
+		Epoch:     3,
 		Status: &ateapipb.WorkerStatus{
-			State:     ateapipb.WorkerState_WORKER_STATE_ACTIVE,
-			Capacity:  &ateapipb.WorkerResources{Actors: 40, Resources: res("16", "64Gi")},
-			Allocated: &ateapipb.WorkerResources{Actors: 3, Resources: res("750m", "3Gi")},
+			State:         ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			ObservedEpoch: 2,
+			Capacity:      &ateapipb.WorkerResources{Actors: 40, Resources: res("16", "64Gi")},
+			Allocated:     &ateapipb.WorkerResources{Actors: 3, Resources: res("750m", "3Gi")},
 		},
 	}, []*ateapipb.ActorAssignment{{Actor: &ateapipb.ObjectRef{Atespace: "a", Name: "b"}}})
 	if w.State != "ACTIVE" || w.Node != "node-1" || w.CapacityActors != 40 || w.AllocatedActors != 3 {
@@ -120,6 +162,9 @@ func TestToWorker(t *testing.T) {
 	}
 	if len(w.Actors) != 1 || w.Actors[0] != "a/b" {
 		t.Fatalf("ToWorker actors = %v", w.Actors)
+	}
+	if len(w.IPs) != 1 || w.IPs[0] != "10.0.0.7" || w.Epoch != 3 || w.ObservedEpoch != 2 {
+		t.Fatalf("ToWorker ips/epoch = %+v", w)
 	}
 	// No resources reported: the fields stay empty.
 	w = ToWorker(&ateapipb.Worker{Metadata: &ateapipb.ResourceMetadata{Name: "w-2"}}, nil)

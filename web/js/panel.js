@@ -246,6 +246,10 @@ export class Panel {
           ? `${esc(workerLabel(d.worker) || a.workerPod || a.worker)}${a.workerNode ? `<span class="muted"> on ${esc(a.workerNode)}</span>` : ''}${this.opts.onShowWorker ? ` <button class="linkbtn" data-act="show-worker" data-worker="${esc(a.worker)}" title="Light up this worker and the agents on it">show worker</button>` : ''}`
           : '<span class="muted">none</span>',
       ),
+      a.worker && a.workerIPs?.length ? row('Worker IP', a.workerIPs.map((ip) => mono(ip)).join(' ')) : '',
+      // Substrate v0.4: a PAUSED actor has no worker but stays attached to
+      // the node holding its local snapshot.
+      !a.worker && a.assignedNode ? row('Node', `${esc(a.assignedNode)}<span class="muted"> (holds its local snapshot)</span>`) : '',
       row('Template', a.template && mono(a.template)),
       row('Snapshot', a.snapshotURI ? mono(a.snapshotURI.replace(/^gs:\/\/[^/]+\//, '…/')) : '<span class="muted">none yet</span>'),
       a.snapshotInProgress ? row('Snapshot', '<span class="busy">in progress</span>') : '',
