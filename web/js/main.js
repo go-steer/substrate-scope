@@ -27,6 +27,7 @@ import { LookPicker, initialLooks, rememberGroup, rememberLayout, rememberBeams,
 import { DECK_KEYS, layoutId, beamModeId, scrollModeId } from './decks.js';
 import { inkOn } from './themes.js';
 import { PerfOverlay } from './perf.js';
+import { ControlsTour } from './tour-ui.js';
 
 const $ = (sel) => document.querySelector(sel);
 /** Short state names for the header chips on narrower screens. */
@@ -577,5 +578,21 @@ if (params.get('bench') === '1') {
   start();
 }
 
+// The controls tour: every way to move around, performed on the live scene
+// with captions (the ? button or key; ?demo=controls loops it, &loop=0 runs
+// it once). It puts the user's camera, decks, beams and layout back after.
+const tour = new ControlsTour(scene, {
+  ready: () => model.seq > 0 && !!scene.island,
+  selected: () => selected,
+  scrollMode: () => scene.gestures.wheel.mode,
+  select,
+  setLayout,
+  setGroup,
+  setBeams,
+  setScroll,
+});
+$('#tour-btn').addEventListener('click', () => tour.toggle({ loop: params.get('loop') === '1' }));
+if (params.get('demo') === 'controls') tour.startWhenReady({ loop: params.get('loop') !== '0' });
+
 // For debugging and screenshots.
-window.scope = { model, scene, panel, select, stateClass, eventCounts, themes, looks, stream, perf };
+window.scope = { model, scene, panel, select, stateClass, eventCounts, themes, looks, stream, perf, tour };

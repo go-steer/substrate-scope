@@ -118,8 +118,10 @@ On Substrate v0.3.0 authorization only covers atespace calls; every other call i
 |---|---|---|---|
 | Orbit | drag on empty space | | one finger |
 | Pan (up, down, left, right, in the screen plane) | right-drag, Shift+drag, or two-finger scroll on a trackpad | arrow keys (Shift: further) | two fingers |
-| Zoom (toward the cursor) | mouse wheel, or pinch on a trackpad | | pinch |
+| Zoom (toward the cursor) | mouse wheel, pinch on a trackpad, or Control+scroll; the + and − buttons (bottom right) | `+`, `-` | pinch |
+| What scrolling does | the Scroll switch (bottom right): auto (a wheel zooms, a trackpad scroll pans), zoom (every scroll zooms, Shift+scroll pans; for a Magic Mouse), pan; remembered, `?scroll=` | | |
 | Select an agent, pin a worker | click (Shift+click works too) | Esc clears | tap |
+| Fly to the selected agent | | `f` | |
 | Move a deck in its plane | drag its rim (highlighted on hover), or Option/Alt+drag anywhere on it | | long-press its rim, then drag |
 | Raise or lower a deck (the gap) | hold Shift while moving it | | |
 | Linked or independent moves | the chain button in the header | Shift+L | |
@@ -127,8 +129,13 @@ On Substrate v0.3.0 authorization only covers atespace calls; every other call i
 | Show one deck or both | | `1`, `2`, `3` | |
 | Beams: focus or all | the Beams toggle in the header (1500 px and wider) | `b` | |
 | Whole cluster | the home button | `h` | |
+| Layout: decks or combined | the Layout toggle in the header | | |
+| Group by atespace or worker | the Group toggle in the header (combined) | `g` | |
+| Controls tour | the ? button (bottom right) | `?` | |
 
 A mouse wheel and a trackpad scroll arrive as the same wheel events: line-mode deltas or big whole steps on one axis are a wheel (zoom); small, fractional or two-axis deltas are a trackpad (pan), and a stream that looked like a trackpad stays one until it pauses for 0.3 s (`WheelKind` in `decks.js`). Pinches arrive with ctrlKey and zoom.
+
+**Controls tour** (`?demo=controls`, the ? button or `?`): a scripted walkthrough that performs every row of this table on the live scene, one step at a time (orbit, pan, zoom, the scroll setting, moving each deck, the gap, linked moves, fades, select and fly, pin, beams, layout, reset), with a caption naming the movement and how to do it by mouse, keyboard and touch, and a ghost cursor, key caps and scroll or pinch glyphs showing the input being simulated. Space pauses, ←/→ step, Esc ends it; the camera, decks, beams, layout, selection and scroll mode are put back afterwards. From the URL it loops (`&loop=0` runs it once), from the button it runs once (`&loop=1` loops). Reduced motion cuts instead of animating. The script and its clock are `web/js/tour.js` (unit tested against this table), the performing and drawing `web/js/tour-ui.js`; `node hack/tour.mjs` records a pass.
 - Level of detail: see Scale. Agent labels as described above, placed greedily in screen space so they never overlap (sizes estimated from the text, so label passes never force a layout).
 - `?synthetic=N` swaps the collector stream for N generated agents in the browser, until the collector's simulator exists. It needs no collector at all: the panel's agent details are generated too, so any static file server can serve `web/` for design work.
 - `?theme=<id>` picks a theme (`web/js/themes.js`: one data object per theme for the scene, lights, bloom and the page's CSS variables); `?tour=1` cycles through them, `?tour=shapes` also steps the agent shape and router look. `?router=` and `?agents=` pick the router look and agent shape; all three are remembered in localStorage and switch live.
