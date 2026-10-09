@@ -59,9 +59,12 @@ test('worker view: one platform per worker, room for its agents, a parked area b
       assert.ok(p.x > d.x && p.x < d.x + d.w && p.z > d.z + d.strip && p.z < d.z + d.d, `${w.name} slot ${s}`);
     }
   }
-  // All the same size, so fills compare at a glance.
-  const sizes = new Set(workers.map((w) => `${plan.districts.get(w.name).w}x${plan.districts.get(w.name).d}`));
-  assert.equal(sizes.size, 1);
+  // All the same width (and base depth), so fills compare at a glance; only
+  // a worker busier than the 90th percentile gets extra rows.
+  const widths = new Set(workers.map((w) => plan.districts.get(w.name).w));
+  assert.equal(widths.size, 1);
+  const depths = workers.map((w) => plan.districts.get(w.name).d).sort((a, b) => a - b);
+  assert.equal(depths.filter((d) => d === depths[0]).length >= workers.length - 2, true);
   for (let i = 0; i < ds.length; i++) for (let j = i + 1; j < ds.length; j++) assert.ok(!overlaps(ds[i], ds[j]), `${ds[i].name} / ${ds[j].name}`);
   for (const d of ds) {
     assert.ok(d.x >= -plan.width / 2 - 1e-9 && d.x + d.w <= plan.width / 2 + 1e-9, `${d.name} within width`);
@@ -151,12 +154,16 @@ test('usage: no CPU/memory allocation reported says "not reported", never an emp
   assert.match(card, /capacity 8/);
   assert.match(card, /capacity 32 GiB/);
   assert.match(card, /1 \/ 1000/);
-  // Only the slots bar is drawn on the pad.
+  // Only the slots bar is drawn on the pad (the others are scaled away).
   const g = new THREE.Group();
   const pads = new WorkerPads(g, fakeLabel);
   pads.sync([{ worker: { name: 'w-1', state: 'ACTIVE' }, x: 0, z: 0, usage: real }], THEMES[0], THREE.AdditiveBlending);
-  const bars = pads.get('w-1').bars.filter((b) => b.track.visible);
-  assert.equal(bars.length, 1);
+  const m4 = new THREE.Matrix4();
+  const shown = [0, 1, 2].filter((k) => {
+    pads.mesh.track.getMatrixAt(k, m4);
+    return new THREE.Vector3().setFromMatrixScale(m4).x > 0;
+  });
+  assert.deepEqual(shown, [0]);
   pads.dispose();
 });
 
@@ -383,35 +390,64 @@ test('links: grow, swap-remove and dispose without leaking', () => {
   assert.equal(parent.children.length, 0);
 });
 
-test('pads: removed workers and dispose free their materials and labels', () => {
+test('pads: instanced (no per-pad meshes or materials); resync, update, labels, picking and dispose', () => {
   const parent = new THREE.Group();
-  const pads = new WorkerPads(parent, fakeLabel);
+  const pads = new WorkerPads(parent, fakeLabel, { labels: 8 });
   const theme = THEMES[0];
   const usage = (n) => W.workerUsage({ capacityActors: 20, capacityCpu: '8', allocatedCpu: '2' }, n);
-  const items = (names) => names.map((name, i) => ({ worker: { name, pod: name, state: 'ACTIVE' }, x: i * 4, z: 0, usage: usage(i) }));
-  pads.sync(items(['w-0', 'w-1', 'w-2']), theme, THREE.AdditiveBlending);
-  assert.equal(parent.children.length, 3);
-  const p1 = pads.get('w-1');
-  assert.equal(p1.bars.filter((b) => b.track.visible).length, 2, 'slots and CPU bars');
-  const own = [p1.pad.material, p1.edges.material, p1.glow.material];
-  const ownDisposed = watch(own);
-  const label = p1.label.element;
-  pads.sync(items(['w-0', 'w-2']), theme, THREE.AdditiveBlending);
-  assert.equal(parent.children.length, 2);
-  assert.equal(ownDisposed.size, 3);
-  assert.ok(label.removed);
-  // Focus: the pad shows a card.
+  const items = (n) =>
+    Array.from({ length: n }, (_, i) => ({ worker: { name: `w-${i}`, pod: `wk-${i}`, state: i === 5 ? 'DRAINING' : 'ACTIVE' }, x: (i % 50) * 4.2, z: Math.floor(i / 50) * 3, usage: usage(i % 7) }));
+  const meshes = () => parent.children.filter((o) => o.isInstancedMesh);
+  const materials = () => {
+    const m = new Set();
+    parent.traverse((o) => o.material && m.add(o.material));
+    return m;
+  };
+  const mats0 = materials();
+  pads.sync(items(2000), theme, THREE.AdditiveBlending);
+  assert.equal(pads.count, 2000);
+  assert.equal(meshes().length, 4, 'pads, glow, tracks, fills: four instanced meshes for 2,000 pads');
+  assert.equal(pads.mesh.body.count, 2000);
+  assert.equal(pads.mesh.track.count, 6000);
+  assert.deepEqual([...materials()], [...mats0], 'no material per pad');
+  // Bars: slots and CPU shown, the third (memory: not reported) scaled away.
+  const m4 = new THREE.Matrix4();
+  const sx = (mesh, k) => {
+    mesh.getMatrixAt(k, m4);
+    return new THREE.Vector3().setFromMatrixScale(m4).x;
+  };
+  assert.ok(sx(pads.mesh.track, 1 * 3) > 0);
+  assert.ok(sx(pads.mesh.track, 1 * 3 + 1) > 0);
+  assert.equal(sx(pads.mesh.track, 1 * 3 + 2), 0);
+  // Shrinking reuses the meshes.
+  const body = pads.mesh.body;
+  pads.sync(items(10), theme, THREE.AdditiveBlending);
+  assert.equal(pads.mesh.body, body);
+  assert.equal(pads.mesh.body.count, 10);
+  // An update rewrites one pad; only its range uploads.
+  pads.flush();
+  assert.ok(pads.update('w-3', items(10)[3].worker, usage(6)));
+  assert.deepEqual(pads.ranges.pad.take(10), [{ start: 3, count: 1 }]);
+  assert.equal(pads.update('nope', {}, usage(0)), false);
+  // Focus: the pad's label grows into a card.
   pads.setFocus({ worker: 'w-2', strong: true });
-  assert.match(pads.get('w-2').label.element.innerHTML, /Slots/);
-  assert.ok(pads.get('w-2').label.element.classList.contains('card'));
+  pads.showLabels([{ name: 'w-2', card: true }]);
+  const card = pads.labelFor('w-2');
+  assert.match(card.element.innerHTML, /Slots/);
+  assert.ok(card.element.classList.contains('card'));
   pads.setFocus({ worker: null, strong: false });
-  assert.ok(!pads.get('w-2').label.element.classList.contains('card'));
-  // Picking finds the worker by its pad mesh.
-  assert.equal(pads.pickable().length, 2);
-  assert.equal(pads.pickable()[0].userData.worker, 'w-0');
+  assert.ok(!card.element.classList.contains('card'));
+  // The label pool caps how many show; the rest hide.
+  pads.showLabels(items(10).map((it) => ({ name: it.worker.name, card: false })));
+  assert.equal(pads.labelPool.filter((l) => l.visible).length, 8);
+  pads.showLabels([]);
+  assert.equal(pads.labelPool.filter((l) => l.visible).length, 0);
+  // Picking by ground point.
+  assert.equal(pads.at(4.2 * 2 + 1.0, 0.5), 'w-2');
+  assert.equal(pads.at(4.2 * 2 + 2.0, 0), null);
+  // Dispose frees every geometry and material and removes the labels.
   const all = resources(parent);
-  for (const g of Object.values(pads.geo)) all.add(g);
-  for (const m of Object.values(pads.mat)) all.add(m);
+  for (const g of Object.values(pads.base)) all.add(g);
   const disposed = watch(all);
   pads.dispose();
   assert.equal(disposed.size, all.size);

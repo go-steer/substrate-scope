@@ -83,39 +83,138 @@ export function parkedCells(n) {
   return Math.max(6, Math.ceil(n * 1.08) + 4);
 }
 
+/** Margin of a node's frame around its workers. */
+export const NODE_PAD = 0.45;
+/** Margin of a node pool's frame, and the strip at its back for its label. */
+export const POOL_PAD = 1.0;
+export const POOL_STRIP = 2.6;
+
+const natural = (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true });
+
 /**
- * Plans the worker view: one platform per worker in a grid at the front,
- * all the same size (sized for the busiest worker's agents) so their fill
- * compares at a glance, and a parked area behind them for agents without a
- * worker (suspended, pending), shaped to hold them comfortably (roughly 1.6
- * times as wide as deep, never a thin strip), so the whole thing stays
- * roughly landscape.
+ * Packs boxes ({w, d}) left to right into rows no wider than maxW (a box
+ * wider than maxW gets a row of its own), each row centered in the widest.
+ * Returns each box's corner relative to (0, 0) and the bounds.
+ */
+export function shelfPack(boxes, maxW, gap) {
+  const pos = [];
+  const rows = [];
+  let x = 0;
+  let z = 0;
+  let rowD = 0;
+  let row = [];
+  const close = () => {
+    if (row.length) rows.push({ items: row, w: x - gap });
+  };
+  for (let i = 0; i < boxes.length; i++) {
+    const b = boxes[i];
+    if (row.length && x + b.w > maxW + 1e-9) {
+      close();
+      z += rowD + gap;
+      x = 0;
+      rowD = 0;
+      row = [];
+    }
+    pos[i] = { x, z };
+    row.push(i);
+    x += b.w + gap;
+    rowD = Math.max(rowD, b.d);
+  }
+  close();
+  const width = Math.max(0, ...rows.map((r) => r.w));
+  for (const r of rows) for (const i of r.items) pos[i].x += (width - r.w) / 2;
+  return { pos, width, depth: boxes.length ? z + rowD : 0 };
+}
+
+/**
+ * Plans the worker view: one platform per worker at the front, grouped by
+ * node pool (a framed block with the pool's name) and, inside a pool, by
+ * node (a frame around the node's workers), and a parked area behind them
+ * for agents without a worker (suspended, pending). Platforms share one
+ * width and base depth (sized for the 90th-percentile worker's agents, with
+ * headroom) so their fill compares at a glance; a busier worker's platform
+ * gets extra rows. The parked area is shaped to hold its agents comfortably
+ * (roughly 1.6 times as wide as deep, never a thin strip), and the whole
+ * thing stays roughly landscape. With one pool there is no pool frame; with
+ * one worker per node (or one node per pool) no node frames (a plain grid
+ * of platforms).
  *
- * @param {{name: string, count: number, capacity?: number}[]} workers
+ * @param {{name: string, count: number, capacity?: number, pool?: string, node?: string}[]} workers
  * @param {number} parked agents without a worker
- * @returns {{width: number, depth: number, districts: Map<string, object>}}
+ * @returns {{width: number, depth: number, districts: Map<string, object>, frames: object[], tiles: object[]}}
  *
  * A worker district has kind 'worker', its own label strip (strip), a slot
  * grid (cols x rows, capacity) and shown: the cells to draw as room (all of
- * them, or fewer when the worker's actor capacity is smaller). The parked
- * district has kind 'parked'.
+ * them, or fewer when the worker's actor capacity is smaller), and its pool
+ * and node. The parked district has kind 'parked'. frames are the pool and
+ * node frames ({kind, name, x, z, w, d, workers}); tiles are what the far
+ * level of detail draws ({name, x, z, w, d, groups}: the parked area and
+ * each pool, or each worker when there is one pool).
  */
 export function planWorkerView(workers, parked) {
-  const list = [...workers].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  const need = Math.max(1, ...list.map((w) => workerCells(w.count)));
+  const list = [...workers].sort((a, b) => natural(a.name, b.name));
+  // Platforms share a width and a base depth sized for the 90th-percentile
+  // worker, so one busy (or draining) worker doesn't blow every platform
+  // up; a worker that needs more gets extra rows.
+  const needs = list.map((w) => workerCells(w.count)).sort((a, b) => a - b);
+  const need = Math.max(1, needs.length ? needs[Math.min(needs.length - 1, Math.floor(needs.length * 0.9))] : 1);
   const cols = Math.max(MIN_WORKER_COLS, Math.ceil(Math.sqrt(need * 1.4)));
   const rows = Math.max(1, Math.ceil(need / cols));
+  const rowsOf = (w) => Math.max(rows, Math.ceil(workerCells(w.count) / cols));
+  const depthOf = (w) => rowsOf(w) * CELL + PAD + WORKER_STRIP;
   const pw = cols * CELL + 2 * PAD;
   const pd = rows * CELL + PAD + WORKER_STRIP;
+  const slotW = pw + GAP;
+  const slotD = pd + GAP;
+
+  // Pools -> nodes -> workers, in natural order.
+  const pools = new Map();
+  for (const w of list) {
+    const pool = w.pool || '';
+    const node = w.node || '';
+    if (!pools.has(pool)) pools.set(pool, new Map());
+    const nodes = pools.get(pool);
+    if (!nodes.has(node)) nodes.set(node, []);
+    nodes.get(node).push(w);
+  }
+  const poolNames = [...pools.keys()].sort(natural);
+  const multiPool = poolNames.length > 1;
 
   const pCells = parkedCells(parked);
   const parkedArea = pCells * CELL * CELL * 1.1;
-  const zoneArea = list.length * (pw + GAP) * (pd + GAP);
+  const zoneArea = list.length * slotW * slotD * (multiPool ? 1.25 : 1);
   const target = Math.max(pw, Math.sqrt((zoneArea + parkedArea) * 1.6));
-  const gridCols = list.length ? Math.min(list.length, Math.max(1, Math.floor((target + GAP) / (pw + GAP)))) : 0;
-  const gridRows = gridCols ? Math.ceil(list.length / gridCols) : 0;
-  const zoneW = gridCols ? gridCols * (pw + GAP) - GAP : 0;
-  const zoneD = gridRows ? gridRows * (pd + GAP) - GAP : 0;
+
+  // Each pool: its nodes packed into rows, framed when there are several.
+  const poolBoxes = poolNames.map((pool) => {
+    const nodes = pools.get(pool);
+    const nodeNames = [...nodes.keys()].sort(natural);
+    // Node frames only help when nodes hold several workers.
+    const framed = nodeNames.length > 1 && nodeNames.some((n) => nodes.get(n).length > 1);
+    const np = framed ? NODE_PAD : 0;
+    const count = nodeNames.reduce((a, n) => a + nodes.get(n).length, 0);
+    const pt = multiPool ? Math.min(target, Math.max(slotW * 2, Math.sqrt(count * slotW * slotD * 1.2 * 1.6))) : target;
+    const perRow = Math.max(1, Math.floor((pt + GAP - 2 * np) / slotW));
+    const nodeBoxes = nodeNames.map((n) => {
+      const ws = nodes.get(n);
+      const k = Math.min(ws.length, perRow);
+      // Rows of k workers; each row as deep as its deepest platform.
+      const rowZ = [];
+      let z = 0;
+      for (let r = 0; r * k < ws.length; r++) {
+        rowZ.push(z);
+        z += Math.max(...ws.slice(r * k, r * k + k).map(depthOf)) + GAP;
+      }
+      return { name: n, workers: ws, k, rowZ, w: k * slotW - GAP + 2 * np, d: z - GAP + 2 * np };
+    });
+    const packed = shelfPack(nodeBoxes, pt, framed ? GAP * 1.5 : GAP);
+    const ox = multiPool ? POOL_PAD : 0;
+    const oz = multiPool ? POOL_STRIP : 0;
+    return { name: pool, nodeBoxes, packed, framed, np, ox, oz, w: packed.width + 2 * ox, d: packed.depth + oz + (multiPool ? POOL_PAD : 0) };
+  });
+  const zone = shelfPack(poolBoxes, Math.max(target, ...poolBoxes.map((b) => b.w)), GAP * 3);
+  const zoneW = zone.width;
+  const zoneD = zone.depth;
 
   // The parked area keeps its own landscape shape: as wide as it needs to
   // be about 1.6:1, at least 12, at most the wider of the platform zone and
@@ -128,8 +227,9 @@ export function planWorkerView(workers, parked) {
   const width = Math.max(zoneW, parkedW);
   const depth = parkedD + (zoneD ? zoneD + 2 * GAP : 0);
   const districts = new Map();
+  const frames = [];
   const z0 = -depth / 2;
-  districts.set(PARKED, {
+  const parkedD0 = {
     name: PARKED,
     kind: 'parked',
     x: -parkedW / 2,
@@ -139,29 +239,101 @@ export function planWorkerView(workers, parked) {
     cols: parkedCols,
     rows: parkedRows,
     capacity: parkedCols * parkedRows,
-  });
+  };
+  districts.set(PARKED, parkedD0);
   const zz = z0 + parkedD + 2 * GAP;
-  list.forEach((wk, i) => {
-    const row = Math.floor(i / gridCols);
-    const col = i % gridCols;
-    // Center a short last row.
-    const inRow = Math.min(gridCols, list.length - row * gridCols);
-    const rowW = inRow * (pw + GAP) - GAP;
-    districts.set(wk.name, {
-      name: wk.name,
-      kind: 'worker',
-      x: -rowW / 2 + col * (pw + GAP),
-      z: zz + row * (pd + GAP),
-      w: pw,
-      d: pd,
-      cols,
-      rows,
-      strip: WORKER_STRIP,
-      capacity: cols * rows,
-      shown: wk.capacity > 0 ? Math.min(cols * rows, Math.max(wk.capacity, wk.count)) : cols * rows,
+  poolBoxes.forEach((pb, pi) => {
+    const px = -zoneW / 2 + zone.pos[pi].x;
+    const pz = zz + zone.pos[pi].z;
+    const poolWorkers = [];
+    pb.nodeBoxes.forEach((nb, ni) => {
+      const nx = px + pb.ox + pb.packed.pos[ni].x;
+      const nz = pz + pb.oz + pb.packed.pos[ni].z;
+      nb.workers.forEach((wk, i) => {
+        const x = nx + pb.np + (i % nb.k) * slotW;
+        const z = nz + pb.np + nb.rowZ[Math.floor(i / nb.k)];
+        const wr = rowsOf(wk);
+        poolWorkers.push(wk.name);
+        districts.set(wk.name, {
+          name: wk.name,
+          kind: 'worker',
+          pool: pb.name,
+          node: nb.name,
+          x,
+          z,
+          w: pw,
+          d: depthOf(wk),
+          cols,
+          rows: wr,
+          strip: WORKER_STRIP,
+          capacity: cols * wr,
+          shown: wk.capacity > 0 ? Math.min(cols * wr, Math.max(wk.capacity, wk.count)) : cols * wr,
+        });
+      });
+      if (pb.framed) frames.push({ kind: 'node', name: nb.name, pool: pb.name, x: nx, z: nz, w: nb.w, d: nb.d, workers: nb.workers.map((w) => w.name) });
+    });
+    if (multiPool) frames.push({ kind: 'pool', name: pb.name, x: px, z: pz, w: pb.w, d: pb.d, strip: POOL_STRIP, workers: poolWorkers });
+  });
+  const rect = (d) => ({ name: d.name, x: d.x, z: d.z, w: d.w, d: d.d });
+  const tiles = [{ ...rect(parkedD0), kind: 'parked', groups: [PARKED] }];
+  if (multiPool) for (const f of frames) if (f.kind === 'pool') tiles.push({ ...rect(f), kind: 'pool', groups: f.workers });
+  if (!multiPool) for (const d of districts.values()) if (d.kind === 'worker') tiles.push({ ...rect(d), kind: 'worker', groups: [d.name] });
+  return { width, depth, districts, frames, tiles };
+}
+
+/** Spacing of worker pads in the atespace view's pad area, and between its rows. */
+export const PAD_SPACING = 4.2;
+export const PAD_ROW = 3;
+
+/**
+ * Plans the atespace view's worker pads along the island's front edge, for
+ * an island width. One pool: rows of pads, centered. Several: one framed
+ * block per node pool (pads in node order), packed into rows. Pad
+ * positions are relative to the first row's center line (x centered on 0);
+ * depth is how much of the island the area takes.
+ * @param {{name: string, pod?: string, pool?: string, node?: string}[]} workers
+ * @param {number} width
+ * @returns {{items: {name: string, x: number, z: number}[], frames: object[], depth: number}}
+ */
+export function planPadArea(workers, width) {
+  const sorted = [...workers].sort((a, b) => natural(a.pod || a.name, b.pod || b.name));
+  const pools = new Map();
+  for (const w of sorted) {
+    const p = w.pool || '';
+    if (!pools.has(p)) pools.set(p, []);
+    pools.get(p).push(w);
+  }
+  const items = [];
+  const frames = [];
+  if (pools.size <= 1) {
+    const perRow = Math.max(1, Math.floor((width + 4) / PAD_SPACING));
+    sorted.forEach((wk, i) => {
+      const row = Math.floor(i / perRow);
+      const col = i % perRow;
+      const inRow = Math.min(perRow, sorted.length - row * perRow);
+      items.push({ name: wk.name, x: -((inRow - 1) * PAD_SPACING) / 2 + col * PAD_SPACING, z: row * PAD_ROW });
+    });
+    const rows = Math.ceil(sorted.length / perRow);
+    return { items, frames, depth: Math.max(1, rows) * PAD_ROW };
+  }
+  const strip = 2.2;
+  const blocks = [...pools.keys()].sort(natural).map((name) => {
+    const ws = pools.get(name).sort((a, b) => natural(a.node || '', b.node || '') || natural(a.pod || a.name, b.pod || b.name));
+    const cols = Math.max(4, Math.ceil(Math.sqrt(ws.length * 2.2)));
+    const rows = Math.ceil(ws.length / cols);
+    return { name, ws, cols, w: cols * PAD_SPACING + 1.2, d: rows * PAD_ROW + strip + 0.4 };
+  });
+  const packed = shelfPack(blocks, Math.max(width, ...blocks.map((b) => b.w)), 1.6);
+  const top = -1.6;
+  blocks.forEach((b, i) => {
+    const bx = -packed.width / 2 + packed.pos[i].x;
+    const bz = top + packed.pos[i].z;
+    frames.push({ kind: 'pool', name: b.name, x: bx, z: bz, w: b.w, d: b.d, strip, workers: b.ws.map((w) => w.name) });
+    b.ws.forEach((wk, j) => {
+      items.push({ name: wk.name, x: bx + 0.6 + ((j % b.cols) + 0.5) * PAD_SPACING, z: bz + strip + 1.1 + Math.floor(j / b.cols) * PAD_ROW });
     });
   });
-  return { width, depth, districts };
+  return { items, frames, depth: packed.depth };
 }
 
 // --------------------------------------------------------------- highlight

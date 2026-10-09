@@ -25,6 +25,7 @@ import { SyntheticStream, syntheticDetail, syntheticOptions } from './synth.js';
 import { ThemePicker } from './theming.js';
 import { LookPicker, initialLooks, rememberGroup } from './looks.js';
 import { inkOn } from './themes.js';
+import { PerfOverlay } from './perf.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -35,6 +36,7 @@ let selected = null;
 const eventCounts = {};
 
 const looks0 = initialLooks();
+const params = new URLSearchParams(window.location.search);
 const scene = new Scene(
   $('#viewport'),
   {
@@ -45,12 +47,12 @@ const scene = new Scene(
       document.body.style.cursor = name ? 'pointer' : '';
     },
   },
-  { shape: looks0.agents, router: looks0.router, extras: looks0.extras, group: looks0.group },
+  { shape: looks0.agents, router: looks0.router, extras: looks0.extras, group: looks0.group, budget: Number(params.get('budget')) || undefined, quality: params.get('quality') || 'auto' },
 );
 let hoverWorker = null;
 // ?synthetic=N replaces the collector with N generated agents (scale checks
 // and design work without a cluster).
-const synthetic = Number(new URLSearchParams(window.location.search).get('synthetic')) || 0;
+const synthetic = Number(params.get('synthetic')) || 0;
 scene.setFakeActivity(synthetic > 0);
 
 // Router look and agent shape: switch live, remembered.
@@ -70,7 +72,7 @@ const panel = new Panel($('#panel'), {
     scene.flyToWorker(name);
   },
   features: () => model.features,
-  detail: synthetic > 0 ? (key) => syntheticDetail(model.agents.get(key)) : undefined,
+  detail: synthetic > 0 ? (key) => syntheticDetail(model.agents.get(key), model.workers) : undefined,
 });
 
 // Themes: switching re-colors the page (CSS variables), the scene, the open
@@ -101,7 +103,7 @@ const streamHandlers = {
       const c = model.counts();
       feed({ type: 'meta', text: `connected to <b>${esc(model.cluster)}</b>: ${model.agents.size} agents, ${c.running} running, ${c.suspended} suspended` });
     }
-    refreshChrome();
+    refreshChrome(true);
     if (selected && !model.agents.has(selected)) select(null);
     else if (selected) panel.show(selected);
     const want = initialSelection();
@@ -111,7 +113,7 @@ const streamHandlers = {
     if (!model.applyEvents(events)) return false;
     for (const e of events) eventCounts[e.type] = (eventCounts[e.type] || 0) + 1;
     scene.applyEvents(events);
-    describe(events).forEach(feed);
+    queueFeed(describe(events));
     refreshChrome();
     if (selected) {
       const a = model.agents.get(selected);
@@ -121,7 +123,7 @@ const streamHandlers = {
     return true;
   },
 };
-const stream = synthetic > 0 ? new SyntheticStream(synthetic, streamHandlers, syntheticOptions(new URLSearchParams(window.location.search))) : new Stream(streamURL(), streamHandlers);
+const stream = synthetic > 0 ? new SyntheticStream(synthetic, streamHandlers, syntheticOptions(params)) : new Stream(streamURL(), streamHandlers);
 
 function initialSelection() {
   const m = /[#&]agent=([^&]+)/.exec(window.location.hash);
@@ -252,7 +254,17 @@ $('#home').addEventListener('click', () => scene.fitCamera());
 
 // ------------------------------------------------------------------ chrome
 
-function refreshChrome() {
+// The header (counts per state, totals) refreshes at most four times a
+// second: at 1,000 changes a second, recounting per batch costs frames.
+let chromeTimer = null;
+function refreshChrome(now = false) {
+  if (!now) {
+    chromeTimer ??= setTimeout(() => {
+      chromeTimer = null;
+      refreshChrome(true);
+    }, 250);
+    return;
+  }
   $('#cluster').textContent = model.cluster || '';
   const counts = model.counts();
   $('#legend').innerHTML = CLASSES.map(
@@ -310,6 +322,37 @@ function feedInset() {
 function updateFeedCounts() {
   $('#feedcount').textContent = feedTotal ? `${feedTotal}` : '';
   $('#feed-unread').textContent = feedUnread ? String(feedUnread > 99 ? '99+' : feedUnread) : '';
+}
+
+// Events reach the feed at most a few times a second. A busy cluster
+// changes hundreds of agents a second; the feed shows the latest few of
+// each batch (crashes first) and a summary line for the rest.
+const FEED_EVERY = 400;
+const FEED_BURST = 8;
+let feedQueue = [];
+let feedTimer = null;
+function queueFeed(items) {
+  feedQueue.push(...items);
+  feedTimer ??= setTimeout(flushFeed, FEED_EVERY);
+}
+
+function flushFeed() {
+  feedTimer = null;
+  const q = feedQueue;
+  feedQueue = [];
+  if (q.length <= FEED_BURST) {
+    q.forEach(feed);
+    return;
+  }
+  const crashed = q.filter((i) => i.type === 'crashed');
+  const keep = [...crashed.slice(-FEED_BURST / 2), ...q.filter((i) => i.type !== 'crashed' && i.type !== 'worker').slice(-FEED_BURST)].slice(-FEED_BURST);
+  const n = {};
+  for (const i of q) n[i.type] = (n[i.type] || 0) + 1;
+  const parts = [['woke', 'woke'], ['suspended', 'suspended'], ['crashed', 'crashed'], ['added', 'added'], ['removed', 'removed'], ['state', 'changed state'], ['worker', 'worker updates']]
+    .filter(([k]) => n[k])
+    .map(([k, label]) => `${n[k]} ${label}`);
+  feed({ type: 'meta', text: `${q.length - keep.length} more events: ${parts.join(', ')}` });
+  keep.forEach(feed);
 }
 
 function feed(item) {
@@ -374,5 +417,31 @@ setInterval(() => {
   $('#clock').textContent = clock();
 }, 1000);
 
+// ?perf=1: the performance overlay (p toggles it); ?bench=1 runs the
+// benchmark once the scene has settled. See docs/design.md, "Scale".
+const perf = new PerfOverlay(
+  document.body,
+  scene,
+  () => ({
+    url: window.location.search || '(none)',
+    agents: model.agents.size,
+    workers: model.workers.size,
+    atespaces: model.atespaces.size,
+    theme: themes.theme?.id || '',
+    shape: scene.shape.id,
+    group: scene.group,
+    lod: scene.stats().lod,
+    quality: scene.stats().quality,
+  }),
+  { visible: params.get('perf') === '1' || params.get('bench') === '1' },
+);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'p' && document.activeElement?.tagName !== 'INPUT') perf.el.hidden = !perf.el.hidden;
+});
+if (params.get('bench') === '1') {
+  const start = () => (model.seq > 0 && scene.island ? setTimeout(() => perf.runBench(), 3000) : setTimeout(start, 500));
+  start();
+}
+
 // For debugging and screenshots.
-window.scope = { model, scene, panel, select, stateClass, eventCounts, themes, looks, stream };
+window.scope = { model, scene, panel, select, stateClass, eventCounts, themes, looks, stream, perf };

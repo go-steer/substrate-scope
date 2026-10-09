@@ -1525,3 +1525,61 @@ table.conds .msg {
     display: none;
   }
 }
+
+/* ?perf=1 overlay (p toggles it). */
+#perf {
+  position: fixed;
+  right: 12px;
+  top: 76px;
+  z-index: 30;
+  min-width: 230px;
+  max-width: 560px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--glass-strong);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font: 11px/1.35 var(--mono);
+  pointer-events: auto;
+}
+
+#perf .perf-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+#perf .bench,
+#perf .copy {
+  font: inherit;
+  color: var(--text);
+  background: var(--chip-bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+#perf .perf-body {
+  margin: 0;
+  white-space: pre;
+}
+
+#perf .perf-result {
+  width: 540px;
+  max-width: 70vw;
+  margin-top: 6px;
+  font: inherit;
+  color: var(--text);
+  background: var(--chip-bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  white-space: pre;
+}
+
+.district-label.pool .name {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}

@@ -26,6 +26,7 @@
 
 import * as THREE from 'three';
 import { CLASSES } from './model.js';
+import { DirtyRanges, uploadRanges } from './dirty.js';
 
 /** Look of each class in the agent shader. */
 export const CLASS_LOOK = {
@@ -39,7 +40,28 @@ export const CLASS_LOOK = {
 /** Seconds of the fake idle timer in synthetic mode (one full drain). */
 export const FAKE_IDLE_SECONDS = 45;
 
+// Level of detail: a shape grows in near the camera (within uCloseFar,
+// full size at uCloseNear, or everywhere when uAllShapes) and shrinks away
+// where its district shows as an aggregate tile; the agent's point sprite
+// fades the other way (points.js), so the two crossfade.
+const lodChunk = /* glsl */ `
+uniform float uScale;
+uniform float uFarLo;
+uniform float uFarHi;
+uniform float uCloseNear;
+uniform float uCloseFar;
+uniform float uAllShapes;
+float lodScale(vec3 c) {
+  vec4 mv = viewMatrix * vec4(c, 1.0);
+  float px = 1.5 * uScale / max(-mv.z, 0.01);
+  float far = 1.0 - smoothstep(uFarLo, uFarHi, px);
+  float close = uAllShapes > 0.5 ? 1.0 : smoothstep(uCloseFar, uCloseNear, distance(c, cameraPosition));
+  return close * (1.0 - far);
+}
+`;
+
 const agentVertex = /* glsl */ `
+${lodChunk}
 attribute float aSeed;
 attribute float aDim;
 attribute float aFlash;
@@ -61,7 +83,13 @@ varying float vFlash;
 varying float vSeed;
 varying float vHi;
 void main() {
-  vec3 p = position;
+  vec3 c0 = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+  float lod = lodScale(c0);
+  if (lod < 0.01) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
+  vec3 p = position * lod;
   vec3 nrm = normal;
   float ph = aSeed * 6.2831;
   if (uSpin != 0.0) {
@@ -80,7 +108,7 @@ void main() {
   }
   mat4 m = modelMatrix * instanceMatrix;
   vec4 wp = m * vec4(p, 1.0);
-  wp.y += uBob * (0.5 + 0.5 * sin(uTime * 1.7 + ph)) * 0.22;
+  wp.y += uBob * (0.5 + 0.5 * sin(uTime * 1.7 + ph)) * 0.22 * lod;
   vNormal = normalize(mat3(m) * nrm);
   #ifdef USE_INSTANCING_COLOR
     vColor = instanceColor;
@@ -208,6 +236,7 @@ void main() {
 
 // Floor decal: drawn at the agent's tile, whatever the agent's own pose.
 const decalVertex = /* glsl */ `
+${lodChunk}
 attribute float aSeed;
 attribute float aDim;
 attribute float aIdle;
@@ -221,7 +250,12 @@ varying float vIdle;
 varying float vDim;
 void main() {
   vec4 c = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-  vec3 wp = vec3(c.x + position.x, 0.135, c.z + position.z);
+  float lod = lodScale(c.xyz);
+  if (lod < 0.01) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
+  vec3 wp = vec3(c.x + position.x * lod, 0.135, c.z + position.z * lod);
   vUv = uv;
   #ifdef USE_INSTANCING_COLOR
     vColor = instanceColor;
@@ -274,6 +308,7 @@ void main() {
 // Rising particles over an agent serving a request: four billboards each.
 const PARTICLES = 4;
 const sparkVertex = /* glsl */ `
+${lodChunk}
 attribute float aSeed;
 attribute float aDim;
 attribute float aServe;
@@ -291,6 +326,10 @@ void main() {
   }
   mat4 m = modelMatrix * instanceMatrix;
   vec3 c = (m * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+  if (lodScale(c) < 0.6) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
   float ph = aSeed * 6.2831;
   float top = c.y + uCrown * length(m[1].xyz) + uBob * (0.5 + 0.5 * sin(uTime * 1.7 + ph)) * 0.22;
   float i = position.z;
@@ -325,6 +364,7 @@ void main() {
 // hue (aTeam: the hue, plus 2 when parked; -1 for none), faded in with uTeam
 // in worker view.
 const tileVertex = /* glsl */ `
+${lodChunk}
 attribute float aTeam;
 attribute float aDim;
 attribute float aHi;
@@ -344,7 +384,12 @@ void main() {
     return;
   }
   vec4 c = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-  vec3 wp = vec3(c.x + position.x, 0.128, c.z + position.z);
+  float lod = lodScale(c.xyz);
+  if (lod < 0.01) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
+  vec3 wp = vec3(c.x + position.x * lod, 0.128, c.z + position.z * lod);
   vUv = uv;
   // aTeam >= 2: parked (no worker), drawn fainter so platforms lead.
   float parked = step(2.0, aTeam);
@@ -389,6 +434,18 @@ function particleGeometry() {
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setIndex(idx);
   return g;
+}
+
+/** The level-of-detail uniforms (shared with the scene's look, or defaults that draw every shape). */
+function lodUniforms(look) {
+  return {
+    uScale: look.uScale || { value: 600 },
+    uFarLo: look.uFarLo || { value: 0 },
+    uFarHi: look.uFarHi || { value: 0.001 },
+    uCloseNear: look.uCloseNear || { value: 1e6 },
+    uCloseFar: look.uCloseFar || { value: 2e6 },
+    uAllShapes: look.uAllShapes || { value: 1 },
+  };
 }
 
 /** Per-instance float attributes every layer keeps (and its extras share). */
@@ -437,6 +494,7 @@ export class Layer {
         uWobble: { value: mo.wobble },
         uY0: { value: bb.min.y },
         uY1: { value: bb.max.y },
+        ...lodUniforms(look),
         ...look,
       },
     });
@@ -458,6 +516,7 @@ export class Layer {
             uRing: { value: d.ring || 0 },
             uShadow: { value: d.shadow || 0 },
             uShadowColor: { value: new THREE.Color(0x000000) },
+            ...lodUniforms(look),
           },
         }),
         mesh: null,
@@ -472,7 +531,7 @@ export class Layer {
           fragmentShader: sparkFragment,
           transparent: true,
           depthWrite: false,
-          uniforms: { uTime: timeUniform, uCrown: { value: shape.crown }, uBob: { value: mo.bob }, uBright: { value: 1.2 }, uWhite: { value: 0.45 } },
+          uniforms: { uTime: timeUniform, uCrown: { value: shape.crown }, uBob: { value: mo.bob }, uBright: { value: 1.2 }, uWhite: { value: 0.45 }, ...lodUniforms(look) },
         }),
         mesh: null,
       };
@@ -485,14 +544,14 @@ export class Layer {
         fragmentShader: tileFragment,
         transparent: true,
         depthWrite: false,
-        uniforms: { uTeam: look.uTeam || { value: 0 }, uTeamSat: look.uTeamSat || { value: 0.5 }, uTeamLight: look.uTeamLight || { value: 0.5 } },
+        uniforms: { uTeam: look.uTeam || { value: 0 }, uTeamSat: look.uTeamSat || { value: 0.5 }, uTeamLight: look.uTeamLight || { value: 0.5 }, ...lodUniforms(look) },
       }),
       mesh: null,
     };
     this.keys = [];
     this.capacity = 0;
     this.mesh = null;
-    this.dirty = false;
+    this.ranges = new DirtyRanges();
     this.attrs = {};
     this.allocate(64);
   }
@@ -577,7 +636,7 @@ export class Layer {
     const slot = this.keys.length;
     this.keys.push(key);
     this.setCount();
-    this.markDirty();
+    this.markSlot(slot);
     return slot;
   }
 
@@ -594,7 +653,7 @@ export class Layer {
     }
     this.keys.pop();
     this.setCount();
-    this.markDirty();
+    this.markSlot(slot);
     return moved;
   }
 
@@ -609,17 +668,25 @@ export class Layer {
     for (const x of this.parts()) x.mesh.count = this.keys.length;
   }
 
+  /** Everything needs uploading (a resize, a clear). */
   markDirty() {
-    this.dirty = true;
+    this.ranges.markAll();
   }
 
+  /** One slot was written: only its range uploads. */
+  markSlot(slot) {
+    this.ranges.mark(slot);
+  }
+
+  get dirty() {
+    return this.ranges.dirty;
+  }
+
+  /** Uploads the slots written since the last flush (ranges, or everything when cheaper). */
   flush() {
-    if (!this.dirty) return;
-    this.dirty = false;
-    this.mesh.instanceMatrix.needsUpdate = true;
-    this.mesh.instanceColor.needsUpdate = true;
-    for (const name of ATTRS) this.attrs[name].needsUpdate = true;
-    if (this.keys.length) this.mesh.computeBoundingSphere();
+    if (!this.ranges.dirty) return;
+    const r = this.ranges.take(this.keys.length);
+    uploadRanges([this.mesh.instanceMatrix, this.mesh.instanceColor, ...ATTRS.map((n) => this.attrs[n])], r);
   }
 
   dispose() {

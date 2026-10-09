@@ -2,11 +2,11 @@
 
 A live 3D view of every agent on [Agent Substrate](https://github.com/agent-substrate/substrate): which agents are running, which are suspended, which just woke up or crashed, per cluster and per atespace. Agents that are [Agent Executor (ax)](https://github.com/google/ax) tasks show what ax knows too (phase, why they were suspended, idle time), and agents that serve a session API (mast, core-agent) can be opened right from the view.
 
-Rendered with three.js and GPU instancing so a cluster with thousands of agents stays interactive. A small Go collector per cluster polls Substrate and ax, never wakes a suspended agent, and pushes changes to the browser.
+Rendered with three.js, GPU instancing and semantic zoom (district heat tiles far away, one point per agent in between, full shapes up close) so a cluster with 100,000 agents and 2,000 workers stays interactive. A small Go collector per cluster polls Substrate and ax, never wakes a suspended agent, and pushes changes to the browser.
 
 ![Overview of a cluster](docs/images/overview.png)
 
-**Status:** milestone 1 (live view of one cluster). See [docs/design.md](docs/design.md) for the design and what comes next.
+**Status:** milestone 1 (live view of one cluster) and the rendering half of milestone 2 (scale). See [docs/design.md](docs/design.md) for the design and what comes next.
 
 ## What you see
 
@@ -19,7 +19,8 @@ Rendered with three.js and GPU instancing so a cluster with thousands of agents 
 - Click an agent for the **side panel**: Substrate state, worker, template, snapshot; ax phase, conditions and reasons (`IdleSuspended`, `ResumedByRequest`, ...), the idle policy and, for running ax tasks, the live idle time. With the attach proxy configured you can list the agent's sessions and **open the agent in [mast-web](https://github.com/go-steer/mast-web)**, a full attach client: read the transcript, send messages, start sessions, interrupt, approve or deny parked actions. A suspended agent gets a **Wake** button that asks first.
 - **Live events** sit in a panel on the left (newest on top, colored by kind; click one to fly to its agent). `e` or the ‹ button collapses it to a tab; the choice is remembered.
 - **Labels** stay quiet: only the selected agent, agents that just changed state (for a few seconds) and, when you zoom in close, the agents around you. Hover an agent for a tooltip. The **Labels** button (or `l`) switches between auto, all and off.
-- **Filters** (atespace, state chips, name prefix) dim everything that doesn't match. `/` focuses the search, Enter flies to the first match, `h` shows the whole island, Esc closes the panel. `?synthetic=5000` replaces the collector with 5,000 generated agents, for looking at the scene at scale.
+- **Filters** (atespace, state chips, name prefix) dim everything that doesn't match. `/` focuses the search, Enter flies to the first match, `h` shows the whole island, Esc closes the panel. `?synthetic=5000` replaces the collector with 5,000 generated agents, for looking at the scene at scale; `&workers=2000` adds a fleet in node pools and `&churn=N` sets state changes per second (default 1% of agents per second from 10,000 agents up).
+- **Big clusters** zoom semantically: far away each atespace (in worker view each node pool) is one tile showing its agents' mix of states, closer each agent is a point sprite, and up close the nearest 5,000 agents are full shapes. `?perf=1` (or `p`) shows frame times, draw calls and instance counts; its Benchmark button (or `?bench=1`) flies a fixed 20 s path and copies a summary to paste. See [Scale](docs/design.md#scale).
 - **Themes**: eight themes (four dark, four light) from the picker at the right of the header, or `?theme=<id>` (`orchid-night`, `abyss-neon`, `volt-noir`, `cotton-candy`, `riso-paper`, `glacier`, `google-light`, `google-dark`). The choice is remembered; `?tour=1` cycles through them every 8 seconds. Every color, light and glow value lives in `web/js/themes.js`.
 
 | Hovering a worker pad | Grouped by worker | A worker pinned in worker view |
