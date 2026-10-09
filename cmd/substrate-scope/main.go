@@ -135,8 +135,6 @@ func run() error {
 		}
 	}
 
-	store := collector.NewStore(collector.Options{Cluster: *clusterName, Source: src.Name(), Features: features})
-	sopts.Store = store
 	if *webDir != "" {
 		sopts.Web = os.DirFS(*webDir)
 	} else {
@@ -145,6 +143,17 @@ func run() error {
 	if _, err := fs.Stat(sopts.Web, "index.html"); err != nil {
 		return fmt.Errorf("front end has no index.html: %w", err)
 	}
+	// mast-web is vendored under web/vendor/mast-web (hack/vendor-mast-web.sh)
+	// and served per agent through the attach proxy.
+	if mw, err := fs.Sub(sopts.Web, "vendor/mast-web"); err == nil && sopts.Attach != nil {
+		if _, err := fs.Stat(mw, "solo.html"); err == nil {
+			sopts.MastWeb = mw
+			features.MastWeb = true
+		}
+	}
+
+	store := collector.NewStore(collector.Options{Cluster: *clusterName, Source: src.Name(), Features: features})
+	sopts.Store = store
 
 	go func() {
 		if err := src.Run(ctx, store); err != nil && !errors.Is(err, context.Canceled) {

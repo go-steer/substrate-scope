@@ -100,6 +100,12 @@ func newRig(t *testing.T) *rig {
 		Runner:      rc,
 		Attach:      rc,
 		AttachToken: router.StaticToken("agent-token"),
+		MastWeb: fstest.MapFS{
+			"index.html":       {Data: []byte("<!doctype html>mast-web index")},
+			"solo.html":        {Data: []byte("<!doctype html>mast-web solo")},
+			"attach-core/x.js": {Data: []byte("// js")},
+			"vendor/marked.js": {Data: []byte("// marked")},
+		},
 	})
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
@@ -334,5 +340,97 @@ func TestStreamAllowedOrigins(t *testing.T) {
 		} else if resp == nil || resp.StatusCode != http.StatusForbidden {
 			t.Errorf("origin %s: err %v, want 403", origin, err)
 		}
+	}
+}
+
+func TestMastWebConfigFromReferer(t *testing.T) {
+	r := newRig(t)
+	get := func(url, referer string) mastWebConfig {
+		t.Helper()
+		req, _ := http.NewRequest("GET", url, nil)
+		if referer != "" {
+			req.Header.Set("Referer", referer)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 || resp.Header.Get("Cache-Control") != "no-store" {
+			t.Fatalf("config %d %v", resp.StatusCode, resp.Header)
+		}
+		var c mastWebConfig
+		if err := json.NewDecoder(resp.Body).Decode(&c); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	c := get(r.srv.URL+"/config", r.srv.URL+"/mast-web/a/cred-test/run/solo.html?x=1")
+	if c.Mode != "proxy" || c.APIPrefix != "/api/agents/cred-test/run/attach" || c.Auth.Mode != "none" || c.Backends == nil {
+		t.Fatalf("config from referer: %+v", c)
+	}
+	// Under a path prefix (a proxy that mounts the UI below /scope/).
+	if c := get(r.srv.URL+"/config", "https://x.example/scope/mast-web/a/cred-test/sleep/solo.html"); c.APIPrefix != "/scope/api/agents/cred-test/sleep/attach" {
+		t.Fatalf("prefixed: %+v", c)
+	}
+	// The per-agent path answers without a Referer.
+	if c := get(r.srv.URL+"/mast-web/a/cred-test/run/config", ""); c.APIPrefix != "/api/agents/cred-test/run/attach" {
+		t.Fatalf("per-agent config: %+v", c)
+	}
+	// No agent, or an unknown one: static, so mast-web shows its setup.
+	for _, ref := range []string{"", r.srv.URL + "/", r.srv.URL + "/mast-web/a/cred-test/nope/solo.html"} {
+		if c := get(r.srv.URL+"/config", ref); c.Mode != "static" || c.APIPrefix != "" {
+			t.Fatalf("referer %q: %+v", ref, c)
+		}
+	}
+	if r.router.count() != 0 {
+		t.Fatalf("config reached the router %d times", r.router.count())
+	}
+}
+
+func TestMastWebFiles(t *testing.T) {
+	r := newRig(t)
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := noRedirect.Get(r.srv.URL + "/mast-web/a/cred-test/run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMovedPermanently || resp.Header.Get("Location") != "run/" {
+		t.Fatalf("redirect %d %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	for path, want := range map[string]string{"": "mast-web index", "solo.html": "mast-web solo", "attach-core/x.js": "// js", "vendor/marked.js": "// marked"} {
+		resp, err := http.Get(r.srv.URL + "/mast-web/a/cred-test/sleep/" + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 || !strings.Contains(string(b), want) || resp.Header.Get("Referrer-Policy") != "same-origin" {
+			t.Fatalf("%q: %d %q %v", path, resp.StatusCode, b, resp.Header)
+		}
+	}
+	for _, path := range []string{"/mast-web/a/cred-test/nope/solo.html", "/mast-web/a/cred-test/run/missing.js", "/mast-web/a/cred-test/run/attach-core"} {
+		if code := getJSON(t, r.srv.URL+path, nil); code != 404 {
+			t.Fatalf("%s: %d", path, code)
+		}
+	}
+	// Serving mast-web, even for a suspended agent, never reaches it.
+	if r.router.count() != 0 || r.actors.calls != 0 {
+		t.Fatalf("router %d, actor reads %d", r.router.count(), r.actors.calls)
+	}
+}
+
+func TestMastWebNeedsAttach(t *testing.T) {
+	store := collector.NewStore(collector.Options{})
+	store.Update(collector.Update{Actors: map[string][]model.Agent{"a": {{Atespace: "a", Name: "b", State: model.StateRunning}}}})
+	srv := httptest.NewServer(New(Options{Store: store, MastWeb: fstest.MapFS{"index.html": {Data: []byte("x")}}}))
+	defer srv.Close()
+	if code := getJSON(t, srv.URL+"/mast-web/a/a/b/", nil); code != 404 {
+		t.Fatalf("code %d", code)
+	}
+	var c mastWebConfig
+	if getJSON(t, srv.URL+"/mast-web/a/a/b/config", &c); c.Mode != "static" {
+		t.Fatalf("config without attach: %+v", c)
 	}
 }

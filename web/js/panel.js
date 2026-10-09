@@ -13,11 +13,18 @@
 // limitations under the License.
 
 // The side panel for the selected agent: Substrate state, ax task details,
-// the runner's live idle time (running agents only) and, through the
-// collector's attach proxy, the agent's sessions with a live event tail.
+// the runner's live idle time (running agents only) and its sessions, with
+// a button that opens the agent in mast-web (served by the collector and
+// attached through its attach proxy).
+//
+// The panel is built once per selected agent. Refreshes after that patch
+// only the live fields (state, age, idle bar, phase, conditions); the
+// sessions section is rebuilt only by the user's own actions or when the
+// agent starts or stops running. Nothing here scrolls the panel.
 
 import { esc, duration, since, parseGoDuration, workerLabel, clock } from './format.js';
 import { cssColor } from './scene.js';
+import { apiBase, mastWebURL, sessionLine, emptySessionsNote, attachError } from './sessions.js';
 
 const REASON_CLASS = {
   IdleSuspended: 'r-idle',
@@ -36,49 +43,6 @@ function mono(s) {
   return `<code>${esc(s)}</code>`;
 }
 
-function apiBase(key) {
-  const [as, ...rest] = key.split('/');
-  return `api/agents/${encodeURIComponent(as)}/${encodeURIComponent(rest.join('/'))}`;
-}
-
-/** Summarizes one attach SSE frame into a short line. */
-export function summarizeFrame(type, data) {
-  try {
-    const d = JSON.parse(data);
-    switch (type) {
-      case 'agent': {
-        const ev = d.event || {};
-        const parts = ev.content?.parts || [];
-        const who = ev.author || ev.content?.role || 'agent';
-        for (const p of parts) {
-          if (p.functionCall) return { kind: 'tool', text: `${who} → ${p.functionCall.name}(${JSON.stringify(p.functionCall.args || {}).slice(0, 80)})` };
-          if (p.functionResponse) return { kind: 'result', text: `${p.functionResponse.name} returned` };
-          if (p.text) return { kind: who === 'user' ? 'user' : 'text', text: `${who}: ${p.text.replace(/\s+/g, ' ').slice(0, 220)}` };
-        }
-        return { kind: 'meta', text: `${who}: (event ${d.seq ?? ''})` };
-      }
-      case 'status-update':
-        return { kind: 'meta', text: `status: ${d.turn_state || JSON.stringify(d).slice(0, 80)}` };
-      case 'usage-update':
-        return { kind: 'meta', text: `usage: ${d.tokens_in_total ?? 0} in / ${d.tokens_out_total ?? 0} out tokens, ${d.turns_total ?? 0} turns` };
-      case 'capabilities':
-        return { kind: 'meta', text: `connected to ${d.server || 'agent'}${d.agent?.model ? ' · ' + d.agent.model : ''}` };
-      case 'tool-call':
-        return { kind: 'tool', text: `tool call: ${d.name || d.tool || ''}` };
-      case 'tool-result':
-        return { kind: 'result', text: `tool result: ${d.name || d.tool || ''}` };
-      case 'turn-complete':
-        return { kind: 'meta', text: 'turn complete' };
-      case 'turn-error':
-        return { kind: 'error', text: `turn error: ${d.error || d.message || ''}` };
-      default:
-        return { kind: 'meta', text: `${type}` };
-    }
-  } catch {
-    return { kind: 'meta', text: `${type}: ${String(data).slice(0, 120)}` };
-  }
-}
-
 export class Panel {
   /**
    * @param {HTMLElement} el
@@ -90,24 +54,26 @@ export class Panel {
     this.key = null;
     this.detail = null;
     this.fetchedAt = 0;
-    this.consent = false;
-    this.sessions = null;
-    this.tail = null;
-    this.tailLines = [];
+    this.loadingKey = null;
+    this.resetSessions();
     this.timer = setInterval(() => this.tick(), 1000);
     el.addEventListener('click', (e) => this.onClick(e));
-    el.addEventListener('wheel', () => {
-      this.followPanel = false;
-    });
+  }
+
+  resetSessions() {
+    this.sessions = null;
+    this.sessionsLoading = false;
+    this.sessionError = '';
+    // wake: '' | 'confirm' | 'waking' | 'waiting'
+    this.wake = '';
+    this.woke = false;
   }
 
   show(key) {
     if (key !== this.key) {
-      this.stopTail();
-      this.consent = false;
-      this.sessions = null;
-      this.sessionError = '';
+      this.resetSessions();
       this.detail = null;
+      this.el.innerHTML = '';
     }
     this.key = key;
     this.el.classList.add('open');
@@ -115,8 +81,8 @@ export class Panel {
   }
 
   hide() {
-    this.stopTail();
     this.key = null;
+    this.detail = null;
     this.el.classList.remove('open');
   }
 
@@ -124,14 +90,35 @@ export class Panel {
   agentChanged(agent) {
     if (!this.detail || !agent) return;
     const was = this.detail.agent.state;
-    this.detail.agent = agent;
-    if (was !== agent.state) this.load();
-    else this.render();
+    this.detail.agent = { ...this.detail.agent, ...agent };
+    if (was !== agent.state) {
+      this.stateChanged(was, agent.state);
+      this.load();
+    }
+    this.updateLive();
+  }
+
+  /** Running-ness flipped: the sessions section offers different things. */
+  stateChanged(from, to) {
+    const running = to === 'RUNNING';
+    if ((from === 'RUNNING') === running) return;
+    if (running) {
+      if (this.wake) this.woke = true;
+      this.wake = '';
+    } else {
+      this.sessions = null;
+      this.sessionError = '';
+      if (this.wake !== 'waking' && this.wake !== 'waiting') this.wake = '';
+    }
+    this.renderSessions();
   }
 
   async load() {
     const key = this.key;
-    if (!key) return;
+    // One load at a time per agent; a load for another agent (the previous
+    // selection) doesn't block this one, and its result is dropped.
+    if (!key || this.loadingKey === key) return;
+    this.loadingKey = key;
     try {
       const resp = await fetch(apiBase(key), { cache: 'no-store' });
       if (key !== this.key) return;
@@ -140,23 +127,32 @@ export class Panel {
         this.el.innerHTML = `<div class="panel-head"><h2>${esc(key)}</h2><button class="close" data-act="close" title="Close">×</button></div><p class="note">This agent is gone.</p>`;
         return;
       }
-      this.detail = await resp.json();
+      const d = await resp.json();
+      if (key !== this.key) return;
+      const prev = this.detail;
+      this.detail = d;
       this.fetchedAt = Date.now();
-      this.render();
+      if (!prev || !this.el.querySelector('[data-sessions]') || !!prev.agent.task !== !!d.agent.task) {
+        this.render();
+      } else {
+        if (prev.agent.state !== d.agent.state) this.stateChanged(prev.agent.state, d.agent.state);
+        this.updateLive();
+      }
     } catch (err) {
       console.warn('agent detail', err);
+    } finally {
+      if (this.loadingKey === key) this.loadingKey = null;
     }
   }
 
   tick() {
     if (!this.key || !this.detail) return;
     // Running ax agents: refresh runner status every 3s (the collector
-    // confirms the actor is still running first). Others: just re-render
-    // the ages.
+    // confirms the actor is still running first). Others: just the ages.
     if (this.detail.agent.state === 'RUNNING' && this.detail.agent.task && Date.now() - this.fetchedAt > 3000) {
       this.load();
     } else {
-      this.renderLive();
+      this.updateLive();
     }
   }
 
@@ -167,15 +163,29 @@ export class Panel {
     return d.runner.idleSeconds + Math.max(0, (Date.now() - Date.parse(d.runnerTime)) / 1000);
   }
 
-  renderLive() {
-    const idle = this.idleNow();
-    const el = this.el.querySelector('[data-live="idle"]');
-    if (el && idle !== null) {
-      const after = parseGoDuration(this.detail.agent.task?.idleSuspendAfter);
-      el.innerHTML = this.idleHTML(idle, after);
+  /** Sets an element's HTML only when it changed (keeps selections, hover). */
+  patch(sel, html) {
+    const el = this.el.querySelector(sel);
+    if (el && el.innerHTML !== html) el.innerHTML = html;
+  }
+
+  /** Updates the fields that change while the panel is open. */
+  updateLive() {
+    const d = this.detail;
+    if (!d) return;
+    const a = d.agent;
+    const badge = this.el.querySelector('[data-live="state"]');
+    if (badge) {
+      if (badge.textContent !== a.state) badge.textContent = a.state;
+      badge.style.setProperty('--c', cssColor(a.state));
     }
-    const age = this.el.querySelector('[data-live="age"]');
-    if (age) age.textContent = duration(since(this.detail.agent.stateSince));
+    this.patch('[data-live="age"]', esc(duration(since(a.stateSince))));
+    this.patch('[data-live="substrate"]', this.substrateHTML());
+    if (a.task) {
+      this.patch('[data-live="phase"]', this.phaseHTML());
+      this.patch('[data-live="idle"]', this.idleRowHTML());
+      this.patch('[data-live="conds"]', this.condsHTML());
+    }
   }
 
   idleHTML(idle, after) {
@@ -189,22 +199,40 @@ export class Panel {
       <div class="idletext">idle ${duration(idle)} of ${duration(after)} · ${left > 0 ? 'suspends in ~' + duration(left) : 'suspending now'}</div>`;
   }
 
-  render() {
+  idleRowHTML() {
     const d = this.detail;
-    if (!d) return;
-    const a = d.agent;
-    const t = a.task;
-    const f = this.opts.features() || {};
-    const color = cssColor(a.state);
-    const parts = [];
-    parts.push(`<div class="panel-head">
-      <div><div class="atespace">${esc(a.atespace)}</div><h2>${esc(a.name)}</h2></div>
-      <button class="close" data-act="close" title="Close">×</button></div>
-      <div class="state-line"><span class="state-badge" style="--c:${color}">${esc(a.state)}</span>
-      <span class="muted">for <span data-live="age">${duration(since(a.stateSince))}</span></span></div>`);
+    const t = d.agent.task;
+    if (d.runner && d.agent.state === 'RUNNING') {
+      let out = row('Idle', this.idleHTML(this.idleNow(), parseGoDuration(t.idleSuspendAfter)), 'wide');
+      if (d.runner.exited) out += row('Command', `exited with code ${d.runner.exitCode}`);
+      return out;
+    }
+    if (d.runnerNote && d.agent.state === 'RUNNING') return row('Idle', `<span class="muted">${esc(d.runnerNote)}</span>`);
+    return '';
+  }
 
-    // Substrate.
-    const sub = [
+  phaseHTML() {
+    const t = this.detail.agent.task;
+    const ready = (t.conditions || []).find((c) => c.type === 'Ready');
+    return row('Phase', `<b>${esc(t.phase || '?')}</b>${ready?.reason ? ` <span class="reason ${REASON_CLASS[ready.reason] || ''}">${esc(ready.reason)}</span>` : ''}`);
+  }
+
+  condsHTML() {
+    const conds = (this.detail.agent.task.conditions || [])
+      .map(
+        (c) => `<tr><td>${esc(c.type)}</td><td class="st-${esc(c.status)}">${esc(c.status)}</td>
+        <td><span class="reason ${REASON_CLASS[c.reason] || ''}">${esc(c.reason || '')}</span>
+        ${c.message ? `<div class="msg">${esc(c.message)}</div>` : ''}</td>
+        <td class="muted">${c.lastTransitionTime ? duration(since(c.lastTransitionTime)) + ' ago' : ''}</td></tr>`,
+      )
+      .join('');
+    return conds ? `<table class="conds"><thead><tr><th>Condition</th><th></th><th>Reason</th><th></th></tr></thead><tbody>${conds}</tbody></table>` : '';
+  }
+
+  substrateHTML() {
+    const d = this.detail;
+    const a = d.agent;
+    return [
       row('Worker', a.worker ? `${esc(workerLabel(d.worker) || a.workerPod || a.worker)}${a.workerNode ? `<span class="muted"> on ${esc(a.workerNode)}</span>` : ''}` : '<span class="muted">none</span>'),
       row('Template', a.template && mono(a.template)),
       row('Snapshot', a.snapshotURI ? mono(a.snapshotURI.replace(/^gs:\/\/[^/]+\//, '…/')) : '<span class="muted">none yet</span>'),
@@ -212,155 +240,141 @@ export class Panel {
       a.crash ? row('Crash', `<span class="crash">${esc(a.crash.message || 'crashed')}</span>${a.crash.time ? `<span class="muted"> at ${esc(clock(a.crash.time))}</span>` : ''}`) : '',
       row('Created', a.createTime && `${esc(new Date(a.createTime).toLocaleString())}`),
       row('UID', a.uid && mono(a.uid)),
-    ];
-    parts.push(`<section><h3>Agent Substrate</h3>${sub.join('')}</section>`);
+    ].join('');
+  }
 
-    // ax.
+  /** Builds the whole panel. Only on selection (and if the agent's shape changes). */
+  render() {
+    const d = this.detail;
+    if (!d) return;
+    const a = d.agent;
+    const t = a.task;
+    const parts = [];
+    parts.push(`<div class="panel-head">
+      <div><div class="atespace">${esc(a.atespace)}</div><h2>${esc(a.name)}</h2></div>
+      <button class="close" data-act="close" title="Close">×</button></div>
+      <div class="state-line"><span class="state-badge" data-live="state" style="--c:${cssColor(a.state)}">${esc(a.state)}</span>
+      <span class="muted">for <span data-live="age">${duration(since(a.stateSince))}</span></span></div>`);
+    parts.push(`<section><h3>Agent Substrate</h3><div data-live="substrate">${this.substrateHTML()}</div></section>`);
     if (t) {
-      const ready = (t.conditions || []).find((c) => c.type === 'Ready');
-      const conds = (t.conditions || [])
-        .map(
-          (c) => `<tr><td>${esc(c.type)}</td><td class="st-${esc(c.status)}">${esc(c.status)}</td>
-          <td><span class="reason ${REASON_CLASS[c.reason] || ''}">${esc(c.reason || '')}</span>
-          ${c.message ? `<div class="msg">${esc(c.message)}</div>` : ''}</td>
-          <td class="muted">${c.lastTransitionTime ? duration(since(c.lastTransitionTime)) + ' ago' : ''}</td></tr>`,
-        )
-        .join('');
       const policy = [];
       if (t.idleSuspendAfter) policy.push(`suspend after ${esc(t.idleSuspendAfter)} idle`);
       if (t.idleBusyPath) policy.push(`busy check ${mono(t.idleBusyPath)}`);
       if (t.onCompletion) policy.push(`on completion: ${esc(t.onCompletion)}`);
-      let runner = '';
-      if (d.runner) {
-        const idle = this.idleNow();
-        runner = row('Idle', `<div data-live="idle">${this.idleHTML(idle, parseGoDuration(t.idleSuspendAfter))}</div>`, 'wide');
-        if (d.runner.exited) runner += row('Command', `exited with code ${d.runner.exitCode}`);
-      } else if (d.runnerNote && a.state === 'RUNNING') {
-        runner = row('Idle', `<span class="muted">${esc(d.runnerNote)}</span>`);
-      }
       parts.push(`<section><h3>ax task</h3>
-        ${row('Phase', `<b>${esc(t.phase || '?')}</b>${ready?.reason ? ` <span class="reason ${REASON_CLASS[ready.reason] || ''}">${esc(ready.reason)}</span>` : ''}`)}
-        ${runner}
+        <div data-live="phase">${this.phaseHTML()}</div>
+        <div data-live="idle">${this.idleRowHTML()}</div>
         ${row('Idle policy', policy.join(' · ') || '<span class="muted">none (never suspended for idleness)</span>')}
         ${row('Image', t.image && mono(t.image.replace(/@sha256:([0-9a-f]{12})[0-9a-f]+/, '@sha256:$1…')))}
         ${row('Serves', t.httpPort ? `API on port ${t.httpPort} through the router` : '')}
         ${row('Workspaces', (t.workspaces || []).map(esc).join(', '))}
-        ${conds ? `<table class="conds"><thead><tr><th>Condition</th><th></th><th>Reason</th><th></th></tr></thead><tbody>${conds}</tbody></table>` : ''}
+        <div data-live="conds">${this.condsHTML()}</div>
       </section>`);
     } else {
       parts.push(`<section><h3>ax task</h3><p class="muted">Not an ax task.</p></section>`);
     }
-
-    parts.push(this.sessionsHTML(a, t, f));
+    parts.push(`<section data-sessions></section>`);
     this.el.innerHTML = parts.join('');
-    this.renderTail();
+    this.renderSessions();
   }
 
-  sessionsHTML(a, t, f) {
+  renderSessions() {
+    const el = this.el.querySelector('[data-sessions]');
+    if (!el || !this.detail) return;
+    el.innerHTML = this.sessionsHTML();
+  }
+
+  sessionsHTML() {
+    const a = this.detail.agent;
+    const t = a.task;
+    const f = this.opts.features() || {};
+    const head = `<h3>Sessions</h3>`;
     if (!f.attach) {
-      return `<section><h3>Sessions</h3><p class="muted">The attach proxy is not configured on this collector.</p></section>`;
+      return `${head}<p class="muted">The attach proxy is not configured on this collector.</p>`;
     }
     const running = a.state === 'RUNNING';
-    const serves = !!t?.httpPort;
     let body = '';
-    if (!serves) body += `<p class="muted">This agent doesn't declare an API through the router (no spec.http.port), so it may not answer.</p>`;
-    if (!this.sessions) {
-      if (running) {
-        body += `<button class="btn" data-act="sessions">List sessions</button>
-          <p class="hint">Requests through ax's pass-through count as activity and restart the idle timer.</p>`;
-      } else {
-        body += `<div class="wake-warning"><b>Opening this agent wakes it.</b> It is ${esc(a.state.toLowerCase())};
-          Agent Substrate's router resumes it to deliver the request, and it will hold a worker until it is idle again.</div>
-          <button class="btn warn" data-act="wake-sessions">Wake and list sessions</button>`;
-      }
+    if (!t?.httpPort) body += `<p class="muted">This agent doesn't declare an API through the router (no spec.http.port), so it may not answer.</p>`;
+
+    // Open, or wake first.
+    if (running) {
+      body += f.mastWeb
+        ? `<a class="btn primary" data-act="open" href="${esc(mastWebURL(this.key))}" target="_blank" rel="noopener">Open in mast-web ↗</a>`
+        : `<p class="muted">mast-web is not bundled with this collector.</p>`;
+    } else if (this.wake === 'confirm') {
+      body += `<div class="wake-warning"><b>Wake ${esc(a.name)}?</b> This resumes the agent: Agent Substrate's router restores it
+        on a worker. It stays awake while a mast-web session is open, and suspends again once it has been idle for its idle policy.</div>
+        <button class="btn warn" data-act="wake-yes">Yes, wake it</button> <button class="btn ghost" data-act="wake-no">Cancel</button>`;
+    } else if (this.wake === 'waking') {
+      body += `<p class="progress">Waking: sent one session-list request through the router…</p>`;
+    } else if (this.wake === 'waiting') {
+      body += `<p class="progress">Woken. Waiting for Agent Substrate to report RUNNING (it says ${esc(a.state.toLowerCase())})…</p>`;
     } else {
-      const list = this.sessions
-        .map((s) => {
-          const id = s.sessionID || s.id;
-          const active = this.tail && this.tail.sid === id;
-          return `<div class="session"><div><code>${esc(id)}</code>
-            <span class="muted">${esc(s.status || '')}${s.last_touched_at ? ' · ' + duration(since(s.last_touched_at)) + ' ago' : ''}</span></div>
-            ${s.has_event_log === false ? '<span class="muted">no event log</span>' : `<button class="btn small" data-act="${active ? 'untail' : 'tail'}" data-sid="${esc(id)}" data-app="${esc(s.app || '')}">${active ? 'Stop' : 'Tail events'}</button>`}</div>`;
-        })
-        .join('');
-      body += list || '<p class="muted">No sessions.</p>';
-      body += `<button class="btn small ghost" data-act="${running ? 'sessions' : 'wake-sessions'}">Refresh</button>`;
+      body += `<p class="muted">It is ${esc(a.state.toLowerCase())}. Opening it needs a request through the router, which wakes it.</p>
+        <button class="btn warn" data-act="wake">Wake agent…</button>`;
+    }
+    if (!running && f.mastWeb && this.wake !== 'confirm') body += ` <span class="btn primary disabled" title="Wake the agent first">Open in mast-web</span>`;
+
+    body += `<p class="operator-note">mast-web acts as the agent's operator: the collector adds the agent's shared token,
+      so there is no per-user identity, and anyone using this UI can send messages, approve or deny actions, and interrupt.
+      While a session is open in mast-web the agent is serving a request, so ax won't idle-suspend it.</p>`;
+
+    // The session list (running agents only).
+    if (running) {
+      let list = '';
+      if (this.sessions) {
+        const now = Date.now();
+        list = this.sessions
+          .map((s) => {
+            const l = sessionLine(s, now);
+            return `<div class="session"><div class="s-main"><code>${esc(l.id)}</code>${l.title ? ` <span class="s-title">${esc(l.title)}</span>` : ''}</div>
+              <div class="s-meta muted">${esc([l.status, l.when].filter(Boolean).join(' · '))}</div></div>`;
+          })
+          .join('');
+        if (!list) list = `<p class="muted">${esc(emptySessionsNote(this.woke))}</p>`;
+      }
+      const label = this.sessionsLoading ? 'Listing…' : this.sessions ? 'Refresh' : 'List sessions';
+      body += `<div class="sessions-head"><span class="muted small">${this.sessions ? `${this.sessions.length} in memory` : 'via the attach proxy'}</span>
+        <button class="btn small ghost" data-act="sessions"${this.sessionsLoading ? ' disabled' : ''}>${label}</button></div>${list}`;
+      if (!this.sessions) body += `<p class="hint">Listing goes through ax's pass-through, which counts as activity and restarts the idle timer.</p>`;
     }
     if (this.sessionError) body += `<p class="error">${esc(this.sessionError)}</p>`;
-    body += `<div class="tail" data-tail></div>`;
-    return `<section><h3>Sessions <span class="muted small">via attach proxy</span></h3>${body}</section>`;
+    return head + body;
   }
 
+  /** Lists sessions; wake=true sends the wake consent with the request. */
   async listSessions(wake) {
-    if (wake) this.consent = true;
+    const key = this.key;
+    if (this.sessionsLoading) return;
+    this.sessionsLoading = true;
     this.sessionError = '';
-    const q = this.consent ? '?scope_wake=1' : '';
+    this.renderSessions();
+    let ok = false;
     try {
-      const resp = await fetch(`${apiBase(this.key)}/attach/sessions${q}`, { cache: 'no-store' });
+      const resp = await fetch(`${apiBase(key)}/attach/sessions${wake ? '?scope_wake=1' : ''}`, { cache: 'no-store' });
       const text = await resp.text();
+      if (key !== this.key) return;
       if (!resp.ok) {
-        let msg = text;
-        try {
-          msg = JSON.parse(text).error || text;
-        } catch {
-          /* plain text */
-        }
-        this.sessionError = `${resp.status}: ${msg.slice(0, 300)}`;
+        const e = attachError(resp.status, text);
+        this.sessionError = e.text;
+        if (e.suspended) this.load();
       } else {
         this.sessions = JSON.parse(text).sessions || [];
+        ok = true;
       }
     } catch (err) {
-      this.sessionError = String(err);
+      if (key === this.key) this.sessionError = String(err);
+    } finally {
+      if (key === this.key) {
+        this.sessionsLoading = false;
+        if (wake) {
+          this.woke = this.woke || ok;
+          this.wake = ok && this.detail?.agent.state !== 'RUNNING' ? 'waiting' : '';
+          this.load();
+        }
+        this.renderSessions();
+      }
     }
-    this.render();
-  }
-
-  startTail(sid, app) {
-    this.stopTail();
-    const path = app ? `${encodeURIComponent(app)}/${encodeURIComponent(sid)}` : encodeURIComponent(sid);
-    const q = this.consent ? '?scope_wake=1' : '';
-    const es = new EventSource(`${apiBase(this.key)}/attach/sessions/${path}/events${q}`);
-    this.tail = { sid, es };
-    this.tailLines = [{ kind: 'meta', text: `tailing ${sid}…`, at: Date.now() }];
-    const types = ['agent', 'status-update', 'usage-update', 'capabilities', 'tool-call', 'tool-result', 'turn-complete', 'turn-error', 'inbox', 'stream-chunk'];
-    for (const ty of types) {
-      es.addEventListener(ty, (e) => {
-        if (ty === 'stream-chunk') return; // token deltas: too chatty for a tail
-        this.tailLines.push({ ...summarizeFrame(ty, e.data), at: Date.now() });
-        if (this.tailLines.length > 300) this.tailLines.splice(0, this.tailLines.length - 300);
-        this.renderTail();
-      });
-    }
-    this.tailLines.push({ kind: 'meta', text: 'while this tail is open the agent is serving a request, so ax will not idle-suspend it', at: Date.now() });
-    es.onerror = () => {
-      this.tailLines.push({ kind: 'error', text: 'stream interrupted (reconnecting)', at: Date.now() });
-      this.renderTail();
-    };
-    this.followPanel = true;
-    this.render();
-  }
-
-  stopTail() {
-    if (this.tail) {
-      this.tail.es.close();
-      this.tail = null;
-    }
-  }
-
-  renderTail() {
-    const el = this.el.querySelector('[data-tail]');
-    if (!el) return;
-    if (!this.tail) {
-      el.innerHTML = '';
-      return;
-    }
-    const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
-    el.innerHTML = this.tailLines
-      .map((l) => `<div class="line ${l.kind}"><span class="ts">${esc(clock(new Date(l.at).toISOString()))}</span> ${esc(l.text)}</div>`)
-      .join('');
-    if (stick) el.scrollTop = el.scrollHeight;
-    // Keep the tail in view until the user scrolls the panel themselves.
-    if (this.followPanel) this.el.scrollTop = this.el.scrollHeight;
   }
 
   onClick(e) {
@@ -373,15 +387,19 @@ export class Panel {
       case 'sessions':
         this.listSessions(false);
         break;
-      case 'wake-sessions':
+      case 'wake':
+        this.wake = 'confirm';
+        this.sessionError = '';
+        this.renderSessions();
+        break;
+      case 'wake-no':
+        this.wake = '';
+        this.renderSessions();
+        break;
+      case 'wake-yes':
+        this.wake = 'waking';
+        this.renderSessions();
         this.listSessions(true);
-        break;
-      case 'tail':
-        this.startTail(btn.dataset.sid, btn.dataset.app);
-        break;
-      case 'untail':
-        this.stopTail();
-        this.render();
         break;
       default:
         break;

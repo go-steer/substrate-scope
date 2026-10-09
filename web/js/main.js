@@ -21,6 +21,7 @@ import { Scene, cssColor } from './scene.js';
 import { Panel } from './panel.js';
 import { esc, duration, since, clock } from './format.js';
 import { describe } from './feed.js';
+import { SyntheticStream } from './synth.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -41,7 +42,10 @@ const panel = new Panel($('#panel'), {
 
 // ------------------------------------------------------------------ stream
 
-new Stream(streamURL(), {
+// ?synthetic=N replaces the collector with N generated agents (scale checks
+// without a cluster).
+const synthetic = Number(new URLSearchParams(window.location.search).get('synthetic')) || 0;
+const streamHandlers = {
   onStatus: (s) => {
     const el = $('#conn');
     el.className = `conn ${s}`;
@@ -74,7 +78,9 @@ new Stream(streamURL(), {
     }
     return true;
   },
-});
+};
+if (synthetic > 0) new SyntheticStream(synthetic, streamHandlers);
+else new Stream(streamURL(), streamHandlers);
 
 function initialSelection() {
   const m = /[#&]agent=([^&]+)/.exec(window.location.hash);
@@ -166,6 +172,8 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'f' && !typing && selected) scene.flyTo(selected);
   if (e.key === 'h' && !typing) scene.fitCamera();
+  if (e.key === 'l' && !typing) cycleLabels();
+  if (e.key === 'e' && !typing) setFeedCollapsed(!feedCollapsed());
 });
 $('#home').addEventListener('click', () => scene.fitCamera());
 
@@ -196,17 +204,87 @@ function refreshChrome() {
 
 // -------------------------------------------------------------------- feed
 
+// The live event feed: a collapsible panel on the left, newest on top.
+const FEED_MAX = 200;
+const FEED_ICON = { added: '+', woke: '↑', suspended: '↓', crashed: '✕', task: '◆', removed: '−', state: '→', worker: '▣', meta: '•' };
 const feedEl = $('#feed');
+let feedTotal = 0;
+let feedUnread = 0;
+
+function feedCollapsed() {
+  return document.body.classList.contains('feed-collapsed');
+}
+
+function setFeedCollapsed(on) {
+  document.body.classList.toggle('feed-collapsed', on);
+  try {
+    localStorage.setItem('substrate-scope:feed-collapsed', on ? '1' : '0');
+  } catch {
+    /* storage blocked: still works for this page */
+  }
+  if (!on) feedUnread = 0;
+  updateFeedCounts();
+}
+
+function updateFeedCounts() {
+  $('#feedcount').textContent = feedTotal ? `${feedTotal}` : '';
+  $('#feed-unread').textContent = feedUnread ? String(feedUnread > 99 ? '99+' : feedUnread) : '';
+}
+
 function feed(item) {
   const div = document.createElement('div');
-  div.className = `item ${item.type}`;
-  const color = item.state ? cssColor(item.state) : '#7f93bd';
-  div.innerHTML = `<span class="ts">${clock()}</span><span class="dot" style="background:${color}"></span><span class="txt">${item.text}</span>`;
+  const type = FEED_ICON[item.type] ? item.type : 'meta';
+  div.className = `item ${type}`;
+  const now = new Date();
+  const color = type === 'state' && item.state ? cssColor(item.state) : '';
+  div.innerHTML = `<span class="icon"${color ? ` style="--c:${color}"` : ''}>${FEED_ICON[type]}</span>
+    <span class="body"><span class="txt">${item.text}</span><span class="ts" title="${esc(now.toLocaleString())}">${clock(now.toISOString())}</span></span>`;
   if (item.key) {
+    div.classList.add('link');
+    div.title = 'Select and fly to this agent';
     div.addEventListener('click', () => model.agents.has(item.key) && select(item.key, true));
   }
+  // Newest on top. If the user has scrolled down to read older events,
+  // keep what they are reading where it is.
+  const keep = feedEl.scrollTop > 0;
   feedEl.prepend(div);
-  while (feedEl.children.length > 9) feedEl.lastChild.remove();
+  if (keep) feedEl.scrollTop += div.offsetHeight;
+  while (feedEl.children.length > FEED_MAX) feedEl.lastChild.remove();
+  feedTotal++;
+  if (feedCollapsed() && type !== 'meta') feedUnread++;
+  updateFeedCounts();
+}
+
+$('#feed-collapse').addEventListener('click', () => setFeedCollapsed(true));
+$('#feed-tab').addEventListener('click', () => setFeedCollapsed(false));
+try {
+  if (localStorage.getItem('substrate-scope:feed-collapsed') === '1') setFeedCollapsed(true);
+} catch {
+  /* storage blocked */
+}
+
+// Agent labels: auto, all or off (remembered).
+const LABEL_MODES = ['auto', 'all', 'off'];
+function setLabelMode(mode) {
+  if (!LABEL_MODES.includes(mode)) mode = 'auto';
+  scene.setLabelMode(mode);
+  $('#labels').textContent = `Labels: ${mode}`;
+  $('#labels').dataset.mode = mode;
+  try {
+    localStorage.setItem('substrate-scope:labels', mode);
+  } catch {
+    /* storage blocked */
+  }
+}
+function cycleLabels() {
+  const cur = $('#labels').dataset.mode || 'auto';
+  setLabelMode(LABEL_MODES[(LABEL_MODES.indexOf(cur) + 1) % LABEL_MODES.length]);
+}
+$('#labels').addEventListener('click', cycleLabels);
+try {
+  setLabelMode(localStorage.getItem('substrate-scope:labels') || 'auto');
+} catch {
+  setLabelMode('auto');
 }
 
 setInterval(() => {
@@ -214,4 +292,4 @@ setInterval(() => {
 }, 1000);
 
 // For debugging and screenshots.
-window.scope = { model, scene, select, stateClass, eventCounts };
+window.scope = { model, scene, panel, select, stateClass, eventCounts };

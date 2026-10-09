@@ -18,6 +18,8 @@
 //	GET /api/stream                            WebSocket: snapshot, then event batches
 //	GET /api/agents/{atespace}/{name}          side panel details (+ runner status if running)
 //	ANY /api/agents/{atespace}/{name}/attach/… optional proxy to the agent's session API
+//	GET /mast-web/a/{atespace}/{name}/…      mast-web attached to that agent (see mastweb.go)
+//	GET /config                                mast-web's bootstrap
 //	GET /healthz
 package server
 
@@ -62,6 +64,8 @@ type Options struct {
 	Runner RunnerStatusReader
 	// Attach, when set, is the attach reverse proxy.
 	Attach *router.Client
+	// MastWeb is the vendored mast-web (served per agent, needs Attach).
+	MastWeb fs.FS
 	// AttachToken supplies the agent bearer token for Attach.
 	AttachToken router.TokenSource
 	// RunnerCacheTTL caches runner status per agent, default 2s.
@@ -106,6 +110,10 @@ func New(o Options) *Server {
 	s.mux.HandleFunc("GET /api/stream", s.stream)
 	s.mux.HandleFunc("GET /api/agents/{atespace}/{name}", s.agent)
 	s.mux.HandleFunc("/api/agents/{atespace}/{name}/attach/{rest...}", s.attach)
+	s.mux.HandleFunc("GET /config", s.mastWebConfigHandler)
+	s.mux.HandleFunc("GET /mast-web/a/{atespace}/{name}", s.mastWebRedirect)
+	s.mux.HandleFunc("GET /mast-web/a/{atespace}/{name}/config", s.mastWebConfigHandler)
+	s.mux.HandleFunc("GET /mast-web/a/{atespace}/{name}/{file...}", s.mastWebFile)
 	if o.Web != nil {
 		s.mux.Handle("/", http.FileServerFS(o.Web))
 	}
