@@ -14,7 +14,8 @@
 
 // The theme picker in the header: applies a theme to the page (CSS custom
 // properties) and the scene, remembers it, and takes ?theme=<id>. With
-// ?tour=1 it cycles through every theme (for comparing them).
+// ?tour=1 it cycles through every theme (for comparing them); ?tour=shapes
+// also steps the agent shape and router look each time (see looks.js).
 
 import { THEMES, themeById, cssVars } from './themes.js';
 
@@ -39,10 +40,12 @@ export class ThemePicker {
   /**
    * @param {HTMLElement} root the picker's container in the header
    * @param {(theme: object) => void} onChange called after the page's CSS is updated
+   * @param {{onTourStep?: () => string}} opts onTourStep: ?tour=shapes, returns text for the toast
    */
-  constructor(root, onChange) {
+  constructor(root, onChange, opts = {}) {
     this.root = root;
     this.onChange = onChange;
+    this.onTourStep = opts.onTourStep;
     const params = new URLSearchParams(window.location.search);
     const want = params.get('theme') || stored();
     this.theme = themeById(want);
@@ -79,7 +82,8 @@ export class ThemePicker {
     });
 
     this.apply();
-    if (params.get('tour')) this.startTour();
+    const tour = params.get('tour');
+    if (tour) this.startTour(tour === 'shapes' && this.onTourStep);
   }
 
   open(on) {
@@ -116,13 +120,14 @@ export class ThemePicker {
     this.onChange?.(t);
   }
 
-  startTour() {
+  /** Cycles themes; with shapes, also steps the agent shape and router. */
+  startTour(shapes = false) {
     this.tour = setInterval(() => {
       const i = THEMES.indexOf(this.theme);
       this.set(THEMES[(i + 1) % THEMES.length].id);
-      this.toast(this.theme.name);
+      this.toast(shapes ? `${this.theme.name} · ${this.onTourStep()}` : this.theme.name);
     }, TOUR_SECONDS * 1000);
-    this.toast(`${this.theme.name} · touring all themes every ${TOUR_SECONDS}s`);
+    this.toast(`${this.theme.name} · touring all themes${shapes ? ', shapes and routers' : ''} every ${TOUR_SECONDS}s`);
   }
 
   stopTour() {

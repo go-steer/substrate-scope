@@ -384,6 +384,18 @@ export function themeById(id) {
   return THEMES.find((t) => t.id === id) || THEMES.find((t) => t.id === DEFAULT_THEME);
 }
 
+/** The Gemini Aurora gradient, for the Google themes' brand accents. */
+export const AURORA = ['#217bfe', '#078efb', '#a770ef', '#ff5e62'];
+
+/**
+ * Four colors for the router's swirl and rings: the Aurora on the Google
+ * themes, else the theme's own router and edge accents.
+ */
+export function routerPalette(theme) {
+  if (theme.id.startsWith('google-')) return AURORA;
+  return [theme.router.band, theme.router.beacon, theme.effects.wake, theme.island.edge];
+}
+
 /** Reads a dot path (as in TOKENS) from a theme. */
 export function token(theme, path) {
   return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), theme);

@@ -23,6 +23,7 @@ import { esc, duration, since, clock } from './format.js';
 import { describe } from './feed.js';
 import { SyntheticStream, syntheticDetail } from './synth.js';
 import { ThemePicker } from './theming.js';
+import { LookPicker, initialLooks } from './looks.js';
 import { inkOn } from './themes.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -33,13 +34,29 @@ let selected = null;
 /** Events seen per type (for tests and screenshot tooling). */
 const eventCounts = {};
 
-const scene = new Scene($('#viewport'), {
-  onPick: (key) => select(key, false),
-  onHover: (key, x, y) => hover(key, x, y),
-});
+const looks0 = initialLooks();
+const scene = new Scene(
+  $('#viewport'),
+  {
+    onPick: (key) => select(key, false),
+    onHover: (key, x, y) => hover(key, x, y),
+  },
+  { shape: looks0.agents, router: looks0.router, extras: looks0.extras },
+);
 // ?synthetic=N replaces the collector with N generated agents (scale checks
 // and design work without a cluster).
 const synthetic = Number(new URLSearchParams(window.location.search).get('synthetic')) || 0;
+scene.setFakeActivity(synthetic > 0);
+
+// Router look and agent shape: switch live, remembered.
+const looks = new LookPicker(
+  { router: $('#router-pick'), agents: $('#agents-pick') },
+  {
+    onRouter: (id) => scene.setRouter(id),
+    onAgents: (id) => scene.setAgentShape(id),
+    onExtras: (on) => scene.setExtras(on),
+  },
+);
 
 const panel = new Panel($('#panel'), {
   onClose: () => select(null),
@@ -57,7 +74,7 @@ const themes = new ThemePicker($('#themes'), (t) => {
     el.style.setProperty('--c', c);
     el.style.setProperty('--ci', inkOn(c));
   });
-});
+}, { onTourStep: () => looks.tourStep() });
 
 // ------------------------------------------------------------------ stream
 
@@ -95,8 +112,7 @@ const streamHandlers = {
     return true;
   },
 };
-if (synthetic > 0) new SyntheticStream(synthetic, streamHandlers);
-else new Stream(streamURL(), streamHandlers);
+const stream = synthetic > 0 ? new SyntheticStream(synthetic, streamHandlers) : new Stream(streamURL(), streamHandlers);
 
 function initialSelection() {
   const m = /[#&]agent=([^&]+)/.exec(window.location.hash);
@@ -190,6 +206,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'h' && !typing) scene.fitCamera();
   if (e.key === 'l' && !typing) cycleLabels();
   if (e.key === 'e' && !typing) setFeedCollapsed(!feedCollapsed());
+  if (e.key === 'x' && !typing) looks.toggleExtras();
 });
 $('#home').addEventListener('click', () => scene.fitCamera());
 
@@ -318,4 +335,4 @@ setInterval(() => {
 }, 1000);
 
 // For debugging and screenshots.
-window.scope = { model, scene, panel, select, stateClass, eventCounts, themes };
+window.scope = { model, scene, panel, select, stateClass, eventCounts, themes, looks, stream };

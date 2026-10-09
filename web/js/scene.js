@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // The 3D scene: the cluster island, atespace districts, agents (one
-// InstancedMesh per visual class), worker pads, the router tower, and the
-// short animations that show events.
+// InstancedMesh per visual class, in a switchable shape), worker pads, the
+// router (in a switchable look), and the short animations that show events.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -25,6 +25,9 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 
 import { CLASSES, stateClass } from './model.js';
+import { AgentLayers } from './agents.js';
+import { shapeById } from './shapes.js';
+import { buildRouter, routerId } from './routers.js';
 import { planIsland, slotPosition, SlotTable } from './layout.js';
 import { esc, duration, since, workerLabel } from './format.js';
 import { Effects } from './effects.js';
@@ -33,17 +36,6 @@ import { themeById, classColor, hex } from './themes.js';
 // The active theme (see themes.js). Every state shares its class color: the
 // five class colors of a theme are validated as a set.
 let theme = themeById();
-/** Height of an agent's column per class. */
-const CLASS_HEIGHT = { running: 1.9, transition: 1.0, suspended: 0.16, crashed: 1.1, pending: 0.7 };
-/** Look of each class in the agent shader. */
-const CLASS_LOOK = {
-  running: { breath: 1, pulse: 0, outline: 0, emissive: 0.75, base: 1.0, speed: 1.4 },
-  transition: { breath: 1, pulse: 0, outline: 0, emissive: 0.9, base: 1.0, speed: 6.0 },
-  suspended: { breath: 0, pulse: 0, outline: 0, emissive: 0.14, base: 0.75, speed: 0 },
-  crashed: { breath: 0, pulse: 1, outline: 0, emissive: 0.55, base: 1.0, speed: 5.0 },
-  pending: { breath: 0.4, pulse: 0, outline: 1, emissive: 0.7, base: 1.0, speed: 1.0 },
-};
-
 export function stateColor(state) {
   return hex(cssColor(state));
 }
@@ -68,200 +60,6 @@ function gradientTexture(top, bottom) {
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
-}
-
-const AGENT_FOOT = 0.92;
-
-const agentVertex = /* glsl */ `
-attribute float aSeed;
-attribute float aDim;
-attribute float aFlash;
-uniform float uTime;
-varying vec3 vNormal;
-varying vec3 vColor;
-varying vec2 vUv;
-varying float vY;
-varying float vDim;
-varying float vFlash;
-varying float vSeed;
-void main() {
-  mat4 m = modelMatrix * instanceMatrix;
-  vec4 wp = m * vec4(position, 1.0);
-  vNormal = normalize(mat3(m) * normal);
-  #ifdef USE_INSTANCING_COLOR
-    vColor = instanceColor;
-  #else
-    vColor = vec3(1.0);
-  #endif
-  vUv = uv;
-  vY = position.y;
-  vDim = aDim;
-  float age = uTime - aFlash;
-  vFlash = (aFlash > 0.0 && age >= 0.0) ? exp(-age * 1.6) : 0.0;
-  vSeed = aSeed;
-  gl_Position = projectionMatrix * viewMatrix * wp;
-}`;
-
-const agentFragment = /* glsl */ `
-uniform float uTime;
-uniform float uBreath;
-uniform float uPulse;
-uniform float uOutline;
-uniform float uEmissive;
-uniform float uBase;
-uniform float uSpeed;
-uniform float uGlow;
-uniform float uAmb;
-uniform float uDiff;
-uniform float uHemi;
-uniform float uGloss;
-uniform float uInk;
-uniform float uOcc;
-uniform vec3 uDimColor;
-varying vec3 vNormal;
-varying vec3 vColor;
-varying vec2 vUv;
-varying float vY;
-varying float vDim;
-varying float vFlash;
-varying float vSeed;
-void main() {
-  float edge = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
-  if (uOutline > 0.5 && edge > 0.08) discard;
-  vec3 n = normalize(vNormal);
-  vec3 L = normalize(vec3(0.35, 1.0, 0.45));
-  float diff = max(dot(n, L), 0.0);
-  float hemi = 0.5 + 0.5 * n.y;
-  vec3 base = vColor * (uAmb + uDiff * diff + uHemi * hemi) * uBase;
-  // Darker toward the foot: a cheap ambient-occlusion feel.
-  base *= mix(1.0 - uOcc, 1.0, smoothstep(0.0, 0.7, vY));
-  float wave = 0.5 + 0.5 * sin(uTime * uSpeed + vSeed * 6.2831);
-  float breath = mix(1.0, 0.55 + 0.45 * wave, uBreath);
-  float pulse = uPulse * pow(wave, 4.0);
-  float top = smoothstep(0.45, 1.0, vY) * step(0.5, 1.0 - abs(n.y - 1.0)) + 0.35 * smoothstep(0.2, 1.0, vY);
-  vec3 glow = vColor * uEmissive * uGlow * (0.25 + 0.9 * top) * breath;
-  glow += vColor * (pulse * 1.6 + vFlash * 1.6) * max(uGlow, 0.4);
-  float rim = smoothstep(0.07, 0.0, edge);
-  glow += vColor * rim * (0.12 + uEmissive * 0.8) * uGlow;
-  vec3 col = base + glow;
-  // Light themes: a glossy highlight on the top face and inked edges.
-  float topFace = step(0.9, n.y);
-  col = mix(col, vec3(1.0), topFace * uGloss * smoothstep(0.75, 0.0, length(vUv - vec2(0.28, 0.72))));
-  col = mix(col, col * 0.42, rim * uInk);
-  col = mix(col, uDimColor, vDim * 0.9);
-  gl_FragColor = vec4(col, 1.0);
-}`;
-
-/** One InstancedMesh per visual class, with slots that can be added and removed. */
-class Layer {
-  constructor(cls, parent, geometry, timeUniform, look) {
-    this.cls = cls;
-    this.parent = parent;
-    this.geometry = geometry;
-    const shared = look;
-    look = CLASS_LOOK[cls];
-    this.material = new THREE.ShaderMaterial({
-      vertexShader: agentVertex,
-      fragmentShader: agentFragment,
-      side: look.outline ? THREE.DoubleSide : THREE.FrontSide,
-      uniforms: {
-        uTime: timeUniform,
-        uBreath: { value: look.breath },
-        uPulse: { value: look.pulse },
-        uOutline: { value: look.outline },
-        uEmissive: { value: look.emissive },
-        uBase: { value: look.base },
-        uSpeed: { value: look.speed },
-        ...shared,
-      },
-    });
-    this.keys = [];
-    this.capacity = 0;
-    this.mesh = null;
-    this.dirty = false;
-    this.allocate(64);
-  }
-
-  allocate(cap) {
-    const old = this.mesh;
-    const mesh = new THREE.InstancedMesh(this.geometry, this.material, cap);
-    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
-    const attr = (name) => {
-      const a = new THREE.InstancedBufferAttribute(new Float32Array(cap), 1);
-      a.setUsage(THREE.DynamicDrawUsage);
-      this.geometry.setAttribute(name, a);
-      return a;
-    };
-    // Each class has its own geometry clone so the per-instance attributes
-    // don't collide between layers.
-    const seed = attr('aSeed');
-    const dim = attr('aDim');
-    const flash = attr('aFlash');
-    if (old) {
-      mesh.instanceMatrix.array.set(old.instanceMatrix.array.subarray(0, this.capacity * 16));
-      mesh.instanceColor.array.set(old.instanceColor.array.subarray(0, this.capacity * 3));
-      seed.array.set(this.seed.array.subarray(0, this.capacity));
-      dim.array.set(this.dim.array.subarray(0, this.capacity));
-      flash.array.set(this.flash.array.subarray(0, this.capacity));
-      this.parent.remove(old);
-      old.dispose();
-    }
-    this.seed = seed;
-    this.dim = dim;
-    this.flash = flash;
-    mesh.count = this.keys.length;
-    mesh.frustumCulled = false;
-    mesh.castShadow = true;
-    mesh.userData.layer = this;
-    this.mesh = mesh;
-    this.capacity = cap;
-    this.parent.add(mesh);
-    this.markDirty();
-  }
-
-  add(key) {
-    if (this.keys.length >= this.capacity) this.allocate(this.capacity * 2);
-    const slot = this.keys.length;
-    this.keys.push(key);
-    this.mesh.count = this.keys.length;
-    this.markDirty();
-    return slot;
-  }
-
-  /** Removes a slot by moving the last one into it. Returns the moved key. */
-  remove(slot) {
-    const last = this.keys.length - 1;
-    let moved = null;
-    if (slot !== last) {
-      moved = this.keys[last];
-      this.keys[slot] = moved;
-      this.mesh.instanceMatrix.array.copyWithin(slot * 16, last * 16, last * 16 + 16);
-      this.mesh.instanceColor.array.copyWithin(slot * 3, last * 3, last * 3 + 3);
-      this.seed.array[slot] = this.seed.array[last];
-      this.dim.array[slot] = this.dim.array[last];
-      this.flash.array[slot] = this.flash.array[last];
-    }
-    this.keys.pop();
-    this.mesh.count = this.keys.length;
-    this.markDirty();
-    return moved;
-  }
-
-  markDirty() {
-    this.dirty = true;
-  }
-
-  flush() {
-    if (!this.dirty) return;
-    this.dirty = false;
-    this.mesh.instanceMatrix.needsUpdate = true;
-    this.mesh.instanceColor.needsUpdate = true;
-    this.seed.needsUpdate = true;
-    this.dim.needsUpdate = true;
-    this.flash.needsUpdate = true;
-    if (this.keys.length) this.mesh.computeBoundingSphere();
-  }
 }
 
 function hashString(s) {
@@ -321,13 +119,16 @@ function textPlane(text, { size = 3, color = '#7f93bd', weight = 700, letterSpac
 const CHANGE_LABEL_SECONDS = 6;
 // Camera-to-target distance under which 'auto' labels every nearby agent.
 const CLOSE_UP_DISTANCE = 20;
+// Camera-to-pad distance under which worker pads show their labels.
+const WORKER_LABEL_DISTANCE = 34;
 
 export class Scene {
   /**
    * @param {HTMLElement} container
    * @param {{onPick?: Function, onHover?: Function}} handlers
+   * @param {{shape?: string, router?: string, extras?: boolean}} opts initial agent shape, router look, extras
    */
-  constructor(container, handlers = {}) {
+  constructor(container, handlers = {}, opts = {}) {
     this.container = container;
     this.handlers = handlers;
     this.time = { value: 0 };
@@ -344,7 +145,17 @@ export class Scene {
     this.model = null;
     // ?slowmo=N plays animations N times slower (for recording demos and
     // for screenshots with a software renderer).
-    this.slowmo = Math.max(1, Number(new URLSearchParams(window.location.search).get('slowmo')) || 1);
+    const params = new URLSearchParams(window.location.search);
+    this.slowmo = Math.max(1, Number(params.get('slowmo')) || 1);
+    // The agents' shape and the router's look (see shapes.js, routers.js);
+    // main.js sets the remembered choice before the first snapshot.
+    this.shape = shapeById(opts.shape);
+    this.routerKind = routerId(opts.router);
+    this.router = null;
+    this.extras = opts.extras !== false;
+    // 1 in synthetic mode: idle rings run on fake timers and a random
+    // subset of running agents "serves requests".
+    this.fake = { value: 0 };
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -397,6 +208,7 @@ export class Scene {
       uGloss: { value: 0 },
       uInk: { value: 0 },
       uOcc: { value: 0 },
+      uAdditive: { value: 1 },
       uDimColor: { value: new THREE.Color() },
     };
 
@@ -407,10 +219,7 @@ export class Scene {
     this.agentGroup = new THREE.Group();
     this.world.add(this.agentGroup);
 
-    const geo = new THREE.BoxGeometry(AGENT_FOOT, 1, AGENT_FOOT);
-    geo.translate(0, 0.5, 0);
-    this.layers = {};
-    for (const cls of CLASSES) this.layers[cls] = new Layer(cls, this.agentGroup, geo.clone(), this.time, this.look);
+    this.buildAgents();
 
     this.effects = new Effects(this.world, this.time);
     this.addBackdrop();
@@ -592,10 +401,11 @@ export class Scene {
     this.look.uGloss.value = g.gloss;
     this.look.uInk.value = g.ink;
     this.look.uOcc.value = g.occlusion;
+    this.look.uAdditive.value = g.additive ? 1 : 0;
     this.look.uDimColor.value.set(sc.background);
-    // Light themes draw every class at full strength: their suspended color
-    // is already pale.
-    for (const cls of CLASSES) this.layers[cls].material.uniforms.uBase.value = g.additive ? CLASS_LOOK[cls].base : 1;
+    // Light themes draw every class at full strength (their suspended color
+    // is already pale) and blend the extras normally.
+    this.agents.setTheme(t);
 
     this.bloom.enabled = t.bloom.strength > 0;
     this.bloom.strength = t.bloom.strength;
@@ -619,17 +429,81 @@ export class Scene {
     if (this.model) this.replan(false);
   }
 
+  // --------------------------------------------------------------- shapes
+
+  /** Builds the agent layers for the current shape. */
+  buildAgents() {
+    this.agents = new AgentLayers(this.agentGroup, this.shape, this.time, this.look, { fake: this.fake });
+    this.layers = this.agents.layers;
+    this.agents.setExtras(this.extras);
+  }
+
+  /** Switches the agents' shape live: the old layers are disposed. */
+  setAgentShape(id) {
+    const shape = shapeById(id);
+    if (shape === this.shape) return;
+    this.shape = shape;
+    this.agents.dispose();
+    this.buildAgents();
+    this.agents.setTheme(theme);
+    this.anims.clear();
+    for (const rec of this.recs.values()) {
+      const pose = shape.pose[rec.cls];
+      rec.h = pose.h;
+      rec.tip = pose.tip;
+      this.attach(rec);
+    }
+    this.rebuildWorkerLines();
+    this.updateMarker();
+  }
+
+  /** Switches the router's look live. */
+  setRouter(id) {
+    const kind = routerId(id);
+    if (kind === this.routerKind && this.router) return;
+    this.routerKind = kind;
+    if (this.island) this.buildRouter();
+  }
+
+  /** Turns the agents' extras (idle rings, light pools, particles) on or off. */
+  setExtras(on) {
+    this.extras = on;
+    this.agents.setExtras(on);
+  }
+
+  /** Synthetic mode: fake idle timers and request serving. */
+  setFakeActivity(on) {
+    this.fake.value = on ? 1 : 0;
+  }
+
+  buildRouter() {
+    this.router?.dispose();
+    this.router = buildRouter(this.routerKind, {
+      theme,
+      blending: this.blending,
+      island: this.island,
+      time: this.time,
+      makeLabel: (text) => {
+        const div = document.createElement('div');
+        div.className = 'tower-label';
+        div.textContent = text;
+        return new CSS2DObject(div);
+      },
+    });
+    this.islandGroup.add(this.router.group);
+  }
+
+  /** World height of an agent's top (labels, arcs, the marker). */
+  topOf(rec) {
+    return this.shape.top(rec.h, rec.tip);
+  }
+
   // ---------------------------------------------------------------- data
 
   /** Rebuilds everything from the model (after a snapshot or a re-plan). */
   setModel(model) {
     this.model = model;
-    for (const cls of CLASSES) {
-      const layer = this.layers[cls];
-      layer.keys.length = 0;
-      layer.mesh.count = 0;
-      layer.markDirty();
-    }
+    for (const cls of CLASSES) this.layers[cls].clear();
     this.recs.clear();
     this.anims.clear();
     this.replan(true);
@@ -648,15 +522,12 @@ export class Scene {
 
     const keys = [...model.agents.keys()].sort();
     const existing = new Map(this.recs);
-    for (const cls of CLASSES) {
-      this.layers[cls].keys.length = 0;
-      this.layers[cls].mesh.count = 0;
-    }
+    for (const cls of CLASSES) this.layers[cls].clear();
     this.recs.clear();
     for (const key of keys) {
       const a = model.agents.get(key);
       const old = existing.get(key);
-      this.place(key, a, old ? old.h : undefined);
+      this.place(key, a, old);
     }
     this.applyFilter();
     this.rebuildWorkers();
@@ -664,7 +535,8 @@ export class Scene {
     if (fit || firstPlan) this.fitCamera();
   }
 
-  place(key, a, h) {
+  /** Places an agent; from: an earlier pose to keep (else its class's pose). */
+  place(key, a, from) {
     const table = this.slots.get(a.atespace);
     if (!table) return false;
     const slot = table.assign(key);
@@ -672,8 +544,8 @@ export class Scene {
     const district = this.plan.districts.get(a.atespace);
     const p = slotPosition(district, slot);
     const cls = stateClass(a.state);
-    const target = CLASS_HEIGHT[cls];
-    const rec = { key, agent: a, cls, slot: -1, x: p.x, z: p.z, h: h ?? target, seed: hashString(key) };
+    const pose = this.shape.pose[cls];
+    const rec = { key, agent: a, cls, slot: -1, x: p.x, z: p.z, h: from?.h ?? pose.h, tip: from?.tip ?? pose.tip, seed: hashString(key) };
     this.recs.set(key, rec);
     this.attach(rec);
     return true;
@@ -685,6 +557,7 @@ export class Scene {
     layer.seed.array[rec.slot] = rec.seed;
     layer.dim.array[rec.slot] = this.filter(rec.agent) ? 0 : 1;
     layer.flash.array[rec.slot] = 0;
+    this.writeActivity(rec);
     const c = new THREE.Color(stateColor(rec.agent.state));
     layer.mesh.instanceColor.setXYZ(rec.slot, c.r, c.g, c.b);
     this.writeMatrix(rec);
@@ -699,14 +572,26 @@ export class Scene {
 
   writeMatrix(rec) {
     const layer = this.layers[rec.cls];
-    const m = layer.mesh.instanceMatrix.array;
-    const o = rec.slot * 16;
-    const h = Math.max(rec.h, 0.02);
-    m[o] = 1; m[o + 1] = 0; m[o + 2] = 0; m[o + 3] = 0;
-    m[o + 4] = 0; m[o + 5] = h; m[o + 6] = 0; m[o + 7] = 0;
-    m[o + 8] = 0; m[o + 9] = 0; m[o + 10] = 1; m[o + 11] = 0;
-    m[o + 12] = rec.x; m[o + 13] = 0.12; m[o + 14] = rec.z; m[o + 15] = 1;
+    this.shape.matrix(layer.mesh.instanceMatrix.array, rec.slot * 16, rec.x, rec.z, rec.h, rec.tip);
     layer.markDirty();
+  }
+
+  /**
+   * Idle progress (1 = just served, 0 = about to suspend; -1 = unknown) and
+   * whether the agent is serving a request. The collector doesn't stream
+   * either yet, so real agents show neither; synthetic mode fakes both (the
+   * shader runs the fake idle timer from aIdle as a phase).
+   */
+  writeActivity(rec) {
+    const layer = this.layers[rec.cls];
+    const fake = this.fake.value > 0;
+    const a = rec.agent;
+    let idle = -1;
+    if (fake) idle = (rec.seed * 7.31) % 1;
+    else if (typeof a.idleProgress === 'number') idle = a.idleProgress;
+    layer.attrs.aIdle.array[rec.slot] = idle;
+    const serving = fake ? (rec.seed * 13.7) % 1 < 0.22 : (a.inFlight || 0) > 0;
+    layer.attrs.aServe.array[rec.slot] = serving ? 1 : 0;
   }
 
   /** Applies a batch of events that the model has already absorbed. */
@@ -744,12 +629,15 @@ export class Scene {
       }
       let rec = this.recs.get(key);
       if (!rec) {
-        if (!this.slots.has(ev.agent.atespace) || !this.place(key, ev.agent, 0.01)) {
+        if (!this.slots.has(ev.agent.atespace) || !this.place(key, ev.agent)) {
           replan = true;
           continue;
         }
         rec = this.recs.get(key);
-        this.animateHeight(rec, CLASS_HEIGHT[rec.cls], 1.2);
+        rec.h = 0;
+        rec.tip = 0;
+        this.writeMatrix(rec);
+        this.animatePose(rec, 1.2);
         if (ev.agent.task) this.effects.beam(rec.x, rec.z, theme.effects.beam);
         this.pinLabel(key, CHANGE_LABEL_SECONDS);
         workersChanged = true;
@@ -760,12 +648,16 @@ export class Scene {
       if (prevState !== ev.agent.state) this.restyle(rec);
       switch (ev.type) {
         case 'agent_woke': {
-          const top = new THREE.Vector3(rec.x, rec.h + 0.2, rec.z);
-          this.effects.arc(this.towerTop, top, theme.effects.wake, () => {
+          // Aim at the agent's running pose: it lifts while the arc flies.
+          const pose = this.shape.pose.running;
+          const top = new THREE.Vector3(rec.x, this.shape.top(pose.h, pose.tip) + 0.2, rec.z);
+          const from = this.router.wake(top, now);
+          const arrive = () => {
             this.flash(rec.key);
             this.effects.ripple(rec.x, rec.z, theme.states.running, 1.4);
-          });
-          this.towerPulse = now;
+          };
+          if (this.router.arcStyle === 'comet') this.effects.comet(from, top, theme.effects.wake, arrive);
+          else this.effects.arc(from, top, theme.effects.wake, arrive);
           this.pinLabel(key, CHANGE_LABEL_SECONDS);
           break;
         }
@@ -811,11 +703,13 @@ export class Scene {
       this.layers[cls].mesh.instanceColor.setXYZ(rec.slot, c.r, c.g, c.b);
       this.layers[cls].markDirty();
     }
-    this.animateHeight(rec, CLASS_HEIGHT[cls], cls === 'suspended' ? 1.6 : 1.0);
+    this.animatePose(rec, cls === 'suspended' ? 1.6 : 1.0);
   }
 
-  animateHeight(rec, to, dur) {
-    this.anims.set(rec.key, { from: rec.h, to, t0: this.time.value, dur });
+  /** Animates an agent from its current pose to its class's pose. */
+  animatePose(rec, dur) {
+    const to = this.shape.pose[rec.cls];
+    this.anims.set(rec.key, { fromH: rec.h, fromTip: rec.tip, toH: to.h, toTip: to.tip, t0: this.time.value, dur });
   }
 
   flash(key) {
@@ -953,40 +847,7 @@ export class Scene {
       d.label = div;
     }
 
-    // Router tower on the left edge.
-    const tx = this.island.cx - islandW / 2 + 2.6;
-    const tz = this.island.cz - islandD / 2 + 2.6;
-    const tower = new THREE.Group();
-    const shaft = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.3, 0.75, 7, 6),
-      new THREE.MeshStandardMaterial({ color: theme.router.shaft, roughness: light ? 0.6 : 0.4, metalness: light ? 0.1 : 0.6, emissive: theme.router.emissive }),
-    );
-    shaft.position.y = 3.5;
-    shaft.castShadow = true;
-    tower.add(shaft);
-    for (let i = 1; i <= 3; i++) {
-      const band = new THREE.Mesh(
-        new THREE.TorusGeometry(0.75 - i * 0.12, 0.05, 6, 24),
-        new THREE.MeshBasicMaterial({ color: theme.router.band }),
-      );
-      band.rotation.x = Math.PI / 2;
-      band.position.y = i * 1.8;
-      tower.add(band);
-    }
-    const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.38, 20, 14), new THREE.MeshBasicMaterial({ color: theme.router.beacon }));
-    beacon.position.y = 7.4;
-    tower.add(beacon);
-    const tdiv = document.createElement('div');
-    tdiv.className = 'tower-label';
-    tdiv.textContent = 'atenet router';
-    const tlabel = new CSS2DObject(tdiv);
-    tlabel.position.y = 8.4;
-    tower.add(tlabel);
-    tower.position.set(tx, 0, tz);
-    g.add(tower);
-    this.towerTop = new THREE.Vector3(tx, 7.4, tz);
-    this.beacon = beacon;
-    this.beaconColor = new THREE.Color(theme.router.beacon);
+    this.buildRouter();
   }
 
   /**
@@ -1120,7 +981,9 @@ export class Scene {
       w.glow.material.blending = this.blending;
       w.glow.material.opacity = running ? (0.06 + Math.min(running, 8) * 0.02) * (light ? 2.5 : 1) : 0.0;
       w.glow.material.color.set(wk.state === 'DRAINING' ? theme.worker.draining : theme.worker.active);
-      w.label.visible = list.length <= 16;
+      w.name = wk.name;
+      w.state = wk.state;
+      w.label.visible = false;
       w.label.element.innerHTML = `<div class="name">${esc(workerLabel(wk))}</div><div class="meta">${running} actor${running === 1 ? '' : 's'}${wk.state && wk.state !== 'ACTIVE' ? ' · ' + esc(wk.state.toLowerCase()) : ''}</div>`;
       w.pos = new THREE.Vector3(x, 0.32, z);
     });
@@ -1132,7 +995,7 @@ export class Scene {
     for (const rec of this.recs.values()) {
       const wk = rec.agent.worker && this.workers.get(rec.agent.worker);
       if (!wk || !wk.pos) continue;
-      pts.push(rec.x, Math.max(rec.h, 0.2) + 0.12, rec.z, wk.pos.x, wk.pos.y, wk.pos.z);
+      pts.push(rec.x, this.topOf(rec), rec.z, wk.pos.x, wk.pos.y, wk.pos.z);
     }
     const g = this.workerLines.geometry;
     g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
@@ -1196,7 +1059,7 @@ export class Scene {
     }
     this.marker.group.visible = true;
     this.marker.group.position.set(rec.x, 0.14, rec.z);
-    const top = Math.max(rec.h, 0.2) + 0.12;
+    const top = this.topOf(rec);
     this.marker.beam.scale.y = 3;
     this.marker.beam.position.y = top + 1.5;
   }
@@ -1230,12 +1093,24 @@ export class Scene {
     const r = this.renderer.domElement.getBoundingClientRect();
     this.pointer.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    const meshes = CLASSES.map((c) => this.layers[c].mesh).filter((m) => m.count > 0);
-    const hits = this.raycaster.intersectObjects(meshes, false);
+    const hits = this.raycaster.intersectObjects(this.agents.pickable(), false);
     for (const h of hits) {
       const layer = h.object.userData.layer;
       if (h.instanceId !== undefined && h.instanceId < layer.keys.length) return layer.keys[h.instanceId];
     }
+    return null;
+  }
+
+  /** The worker pad under the pointer, by worker name. */
+  pickWorker(clientX, clientY) {
+    if (!this.hoverAt) return null;
+    const r = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const pads = [...this.workers.values()].map((w) => w.pad);
+    const hit = this.raycaster.intersectObjects(pads, false)[0];
+    if (!hit) return null;
+    for (const [name, w] of this.workers) if (w.pad === hit.object) return name;
     return null;
   }
 
@@ -1267,14 +1142,15 @@ export class Scene {
       }
       const k = Math.min((t - an.t0) / an.dur, 1);
       const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
-      rec.h = an.from + (an.to - an.from) * e;
+      rec.h = an.fromH + (an.toH - an.fromH) * e;
+      rec.tip = an.fromTip + (an.toTip - an.fromTip) * e;
       this.writeMatrix(rec);
       if (rec.agent.worker) linesDirty = true;
       if (key === this.selected) this.updateMarker();
       if (k >= 1) this.anims.delete(key);
     }
     if (linesDirty) this.rebuildWorkerLines();
-    for (const l of Object.values(this.layers)) l.flush();
+    this.agents.flush();
 
     // Fly-to.
     if (this.flyAnim) {
@@ -1292,12 +1168,7 @@ export class Scene {
       const s = 1 + 0.12 * Math.sin(t * 3);
       this.marker.ring.scale.set(s, s, s);
     }
-    if (this.beacon) {
-      const since = this.towerPulse !== undefined ? t - this.towerPulse : 99;
-      const k = 0.8 + 0.2 * Math.sin(t * 2) + 2.5 * Math.exp(-since * 2.5);
-      this.beacon.scale.setScalar(0.8 + 0.25 * k);
-      this.beacon.material.color.copy(this.beaconColor).multiplyScalar(theme.glow.additive ? k : 0.7 + 0.3 * Math.min(k, 1.4));
-    }
+    this.router?.update(t, dt);
 
     this.effects.update(t);
 
@@ -1305,16 +1176,82 @@ export class Scene {
       this.lastHoverPick = t;
       const key = this.pick(this.hoverAt.x, this.hoverAt.y);
       this.setHover(key, this.hoverAt.x, this.hoverAt.y);
+      const pad = key ? null : this.pickWorker(this.hoverAt.x, this.hoverAt.y);
+      if (pad !== this.hoverWorker) {
+        this.hoverWorker = pad;
+        this.lastLabelUpdate = -1;
+      }
     }
 
     if (t - this.lastLabelUpdate > 0.25) {
       this.lastLabelUpdate = t;
       this.updateAgentLabels();
       this.layoutDistrictLabels();
+      this.layoutWorkerLabels();
+      this.keepRouterLabelClear();
     }
 
     this.composer.render();
     this.labelRenderer.render(this.scene, this.camera);
+  }
+
+  /**
+   * Worker pad labels are quiet like agent labels: shown for the hovered
+   * pad, the selected agent's pad, pads that aren't plainly active (for
+   * example draining), and every pad when the camera is close to it or
+   * labels are 'all'. They are placed greedily in screen space after the
+   * district and agent labels and never overlap them or each other.
+   */
+  layoutWorkerLabels() {
+    if (!this.workers.size) return;
+    const W = this.renderer.domElement.clientWidth;
+    const H = this.renderer.domElement.clientHeight;
+    const cam = this.camera.position;
+    const mode = this.labelMode;
+    const host = this.selected && this.recs.get(this.selected)?.agent.worker;
+    const placed = [];
+    const obstacle = (el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width) placed.push({ x0: r.left, x1: r.right, y0: r.top, y1: r.bottom });
+    };
+    for (const o of this.agentLabels) if (o.visible) obstacle(o.element);
+    if (this.plan) for (const d of this.plan.districts.values()) if (d.label && !d.label.classList.contains('crowded')) obstacle(d.label);
+    const items = [];
+    const wp = new THREE.Vector3();
+    for (const [name, w] of this.workers) {
+      w.label.getWorldPosition(wp);
+      const notable = !!w.state && w.state !== 'ACTIVE';
+      const prio = name === this.hoverWorker ? 0 : name === host ? 1 : notable ? 2 : 3;
+      const near = cam.distanceTo(wp) < WORKER_LABEL_DISTANCE;
+      const want = prio === 0 || (mode !== 'off' && (prio < 3 || near || mode === 'all'));
+      w.label.visible = false;
+      if (want) items.push({ w, prio, d: cam.distanceTo(wp), p: wp.clone() });
+    }
+    items.sort((a, b) => a.prio - b.prio || a.d - b.d);
+    for (const { w, p } of items) {
+      p.project(this.camera);
+      if (p.z > 1) continue;
+      const x = (p.x * 0.5 + 0.5) * W;
+      const y = (-p.y * 0.5 + 0.5) * H;
+      // Estimated from the text: the element isn't laid out while hidden.
+      const chars = Math.max(4, ...[...w.label.element.children].map((c) => c.textContent.length));
+      const half = chars * 3.2 + 6;
+      const box = { x0: x - half, x1: x + half, y0: y - 15, y1: y + 15 };
+      if (placed.some((b) => box.x0 < b.x1 && box.x1 > b.x0 && box.y0 < b.y1 && box.y1 > b.y0)) continue;
+      placed.push(box);
+      w.label.visible = true;
+    }
+  }
+
+  /** Moves the router's label to the right of its anchor when the events panel would cover it. */
+  keepRouterLabelClear() {
+    const l = this.router?.labelObj;
+    if (!l) return;
+    const p = l.getWorldPosition(new THREE.Vector3()).project(this.camera);
+    const x = (p.x * 0.5 + 0.5) * this.renderer.domElement.clientWidth;
+    const w = l.element.offsetWidth || 110;
+    const covered = x - w / 2 < (this.leftInset || 0);
+    l.center.set(covered ? 0 : 0.5, 0.5);
   }
 
   /**
@@ -1336,7 +1273,7 @@ export class Scene {
     const maxDist = mode === 'all' ? 60 : closeUp ? 34 : 0;
     if (mode !== 'off') {
       for (const rec of this.recs.values()) {
-        p.set(rec.x, rec.h, rec.z);
+        p.set(rec.x, this.topOf(rec), rec.z);
         const selected = rec.key === this.selected;
         const until = this.labelPinned.get(rec.key) || 0;
         const pinned = until > t;
@@ -1368,7 +1305,7 @@ export class Scene {
     for (const item of near) {
       if (chosen.length >= this.agentLabels.length) break;
       const { rec } = item;
-      p.set(rec.x, Math.max(rec.h, 0.2) + 0.25, rec.z).project(this.camera);
+      p.set(rec.x, this.topOf(rec) + 0.13, rec.z).project(this.camera);
       const x = (p.x * 0.5 + 0.5) * W;
       const y = (-p.y * 0.5 + 0.5) * H;
       const w = 40 + rec.agent.name.length * 7 + (rec.agent.state.length + 8) * 5.6;
@@ -1388,7 +1325,7 @@ export class Scene {
       }
       const { rec } = item;
       obj.visible = true;
-      obj.position.set(rec.x, Math.max(rec.h, 0.2) + 0.25, rec.z);
+      obj.position.set(rec.x, this.topOf(rec) + 0.13, rec.z);
       const a = rec.agent;
       const age = duration(since(a.stateSince, now));
       const html = `<span class="dot" style="background:${cssColor(a.state)}"></span>${esc(a.name)}<span class="sub">${esc(a.state.toLowerCase())} ${age}</span>`;

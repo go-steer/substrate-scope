@@ -328,6 +328,19 @@ button.icon {
   font-size: 15px;
 }
 
+/* ------------------------------------------------- router and agent pickers */
+
+select.look-pick {
+  font-size: 12px;
+  height: 28px;
+  padding: 3px 6px;
+  cursor: pointer;
+}
+
+select.look-pick:hover {
+  border-color: var(--accent);
+}
+
 /* ----------------------------------------------------------- theme picker */
 
 .themes {
@@ -1268,6 +1281,32 @@ table.conds .msg {
 @media (max-width: 1800px) {
   .theme-btn .theme-name {
     display: none;
+  }
+
+  input[type="search"] {
+    width: 100px;
+  }
+
+  .legend {
+    gap: 4px;
+  }
+
+  .legend .chip {
+    padding: 4px 8px;
+    gap: 5px;
+  }
+
+  /* The LED alone says live or not; the word comes back on wide screens. */
+  .conn .txt {
+    display: none;
+  }
+
+  #atespace {
+    max-width: 128px;
+  }
+
+  .filters {
+    gap: 6px;
   }
 }
 
