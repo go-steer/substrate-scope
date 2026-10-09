@@ -17,7 +17,7 @@
 // worker usage (actor slots, CPU, memory) and atespace tints. Pure functions,
 // no three.js or DOM, so they run under `node --test`.
 
-import { CELL, PAD, GAP, LABEL_STRIP, reservedCells } from './layout.js';
+import { CELL, PAD, GAP, LABEL_STRIP } from './layout.js';
 
 /** Ways to group agents into districts. */
 export const GROUPS = ['atespace', 'worker'];
@@ -65,36 +65,51 @@ export function groupCounts(model, mode) {
   return m;
 }
 
-/** Cells a worker platform needs: its actor capacity when known, else room to grow. */
-export function workerCells(count, capacity) {
-  return capacity > 0 ? Math.max(capacity, count) : reservedCells(count);
+/** Smallest number of cells on a worker platform. */
+export const MIN_WORKER_CELLS = 6;
+
+/**
+ * Cells a worker platform needs for the agents assigned to it, with
+ * headroom so a few more can land without re-planning. Never the worker's
+ * actor capacity: real workers report capacities like 1000, which would make
+ * every platform huge and its agents specks. Capacity is a label and a bar.
+ */
+export function workerCells(count) {
+  return Math.max(MIN_WORKER_CELLS, Math.ceil(count * 1.35) + 2);
+}
+
+/** Cells the parked area reserves for n agents without a worker (plus spare). */
+export function parkedCells(n) {
+  return Math.max(6, Math.ceil(n * 1.08) + 4);
 }
 
 /**
  * Plans the worker view: one platform per worker in a grid at the front,
- * all the same size so their fill compares at a glance, and a parked area
- * behind them for agents without a worker (suspended, pending), wide enough
- * that the whole thing stays roughly as wide as it is deep times 1.6.
+ * all the same size (sized for the busiest worker's agents) so their fill
+ * compares at a glance, and a parked area behind them for agents without a
+ * worker (suspended, pending), shaped to hold them comfortably (roughly 1.6
+ * times as wide as deep, never a thin strip), so the whole thing stays
+ * roughly landscape.
  *
  * @param {{name: string, count: number, capacity?: number}[]} workers
  * @param {number} parked agents without a worker
  * @returns {{width: number, depth: number, districts: Map<string, object>}}
  *
  * A worker district has kind 'worker', its own label strip (strip), a slot
- * grid (cols x rows, capacity) and shown: the cells to draw as room (its
- * actor capacity when known). The parked district has kind 'parked'.
+ * grid (cols x rows, capacity) and shown: the cells to draw as room (all of
+ * them, or fewer when the worker's actor capacity is smaller). The parked
+ * district has kind 'parked'.
  */
 export function planWorkerView(workers, parked) {
   const list = [...workers].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  const need = Math.max(1, ...list.map((w) => workerCells(w.count, w.capacity || 0)));
+  const need = Math.max(1, ...list.map((w) => workerCells(w.count)));
   const cols = Math.max(MIN_WORKER_COLS, Math.ceil(Math.sqrt(need * 1.4)));
   const rows = Math.max(1, Math.ceil(need / cols));
   const pw = cols * CELL + 2 * PAD;
   const pd = rows * CELL + PAD + WORKER_STRIP;
 
-  // Parked cells: everyone without a worker plus one spare row's worth.
-  const parkedCells = Math.max(6, Math.ceil(parked * 1.08) + 4);
-  const parkedArea = parkedCells * CELL * CELL * 1.1;
+  const pCells = parkedCells(parked);
+  const parkedArea = pCells * CELL * CELL * 1.1;
   const zoneArea = list.length * (pw + GAP) * (pd + GAP);
   const target = Math.max(pw, Math.sqrt((zoneArea + parkedArea) * 1.6));
   const gridCols = list.length ? Math.min(list.length, Math.max(1, Math.floor((target + GAP) / (pw + GAP)))) : 0;
@@ -102,9 +117,12 @@ export function planWorkerView(workers, parked) {
   const zoneW = gridCols ? gridCols * (pw + GAP) - GAP : 0;
   const zoneD = gridRows ? gridRows * (pd + GAP) - GAP : 0;
 
-  const parkedW = Math.max(zoneW, Math.min(target, Math.max(12, Math.sqrt(parkedArea * 1.6))), 12);
+  // The parked area keeps its own landscape shape: as wide as it needs to
+  // be about 1.6:1, at least 12, at most the wider of the platform zone and
+  // the island's target width. Its grid gets a spare row.
+  const parkedW = Math.min(Math.max(12, Math.sqrt(parkedArea * 1.6)), Math.max(12, zoneW, target));
   const parkedCols = Math.max(1, Math.floor((parkedW - 2 * PAD) / CELL));
-  const parkedRows = Math.max(1, Math.ceil(parkedCells / parkedCols));
+  const parkedRows = Math.max(1, Math.ceil(pCells / parkedCols));
   const parkedD = parkedRows * CELL + PAD + LABEL_STRIP;
 
   const width = Math.max(zoneW, parkedW);
@@ -140,7 +158,7 @@ export function planWorkerView(workers, parked) {
       rows,
       strip: WORKER_STRIP,
       capacity: cols * rows,
-      shown: Math.min(cols * rows, wk.capacity > 0 ? wk.capacity : workerCells(wk.count, 0)),
+      shown: wk.capacity > 0 ? Math.min(cols * rows, Math.max(wk.capacity, wk.count)) : cols * rows,
     });
   });
   return { width, depth, districts };
@@ -222,15 +240,22 @@ export function formatBytes(bytes) {
 
 /**
  * A worker's usage: actor slots (used = agents the scene shows on it, cap =
- * its capacity, 0 when unknown), and CPU and memory when it reports both
- * capacity and allocation (else null). frac is used/cap (0 when unknown).
+ * its capacity, 0 when unknown), and CPU and memory. A resource is null when
+ * the worker reports neither capacity nor allocation; {reported: false, cap}
+ * when it reports capacity but no allocation (real Substrate today: ax tasks
+ * declare no resource limits, so nothing is allocated even while the worker
+ * hosts agents); else {used, cap, frac} with frac = used/cap.
  */
 export function workerUsage(worker, hosted) {
   const res = (used, cap) => {
     const u = parseQuantity(used);
     const c = parseQuantity(cap);
-    if (!Number.isFinite(u) || !Number.isFinite(c) || c <= 0) return null;
-    return { used: u, cap: c, frac: u / c };
+    const hasCap = Number.isFinite(c) && c > 0;
+    // Nothing allocated while it hosts agents means "not declared", not idle.
+    const hasUse = Number.isFinite(u) && (u > 0 || hosted === 0);
+    if (!hasCap && !hasUse) return null;
+    if (!hasCap || !hasUse) return { reported: false, cap: hasCap ? c : NaN };
+    return { reported: true, used: u, cap: c, frac: u / c };
   };
   const cap = worker?.capacityActors || 0;
   return {

@@ -48,11 +48,14 @@ export function agentRequest(key) {
  * time; each worker gets 1.4x to 2.2x its share of actor slots, and CPU and
  * memory to match (4 GiB per core), so fills differ from worker to worker.
  */
-export function syntheticWorkers(n, r) {
+export function syntheticWorkers(n, r, { workerCap = 0 } = {}) {
   const share = Math.max(4, (n * 0.1) / WORKERS);
   return Array.from({ length: WORKERS }, (_, i) => {
-    const capacityActors = Math.max(8, Math.round(share * (1.4 + r() * 0.8)));
-    const cores = Math.max(4, Math.ceil((capacityActors * 0.5) / 4) * 4);
+    const sized = Math.max(8, Math.round(share * (1.4 + r() * 0.8)));
+    // workerCap: every worker reports this many actor slots (real Substrate
+    // workers say 1000), whatever they host; CPU and memory stay sized.
+    const capacityActors = workerCap > 0 ? workerCap : sized;
+    const cores = Math.max(4, Math.ceil((sized * 0.5) / 4) * 4);
     return {
       name: `w-${i}`,
       pod: `wk-${String(i).padStart(2, '0')}`,
@@ -77,8 +80,12 @@ function pickWorker(r, workers, load) {
   return workers[0].name;
 }
 
-/** Fills in each worker's allocated slots, CPU and memory from the agents it holds. */
-export function allocate(workers, agents) {
+/**
+ * Fills in each worker's allocated slots, CPU and memory from the agents it
+ * holds. With resources false, CPU and memory allocation are left out, as
+ * real Substrate reports them while ax tasks declare no limits.
+ */
+export function allocate(workers, agents, resources = true) {
   const use = new Map(workers.map((w) => [w.name, { n: 0, cpu: 0, mem: 0 }]));
   for (const a of agents) {
     const u = a.worker && use.get(a.worker);
@@ -91,6 +98,11 @@ export function allocate(workers, agents) {
   for (const w of workers) {
     const u = use.get(w.name);
     w.allocatedActors = u.n;
+    if (!resources) {
+      delete w.allocatedCpu;
+      delete w.allocatedMemory;
+      continue;
+    }
     w.allocatedCpu = `${Math.round(u.cpu * 1000)}m`;
     w.allocatedMemory = `${Math.round(u.mem / 2 ** 20)}Mi`;
   }
@@ -100,10 +112,22 @@ export function allocate(workers, agents) {
 const WORDS = ['payments', 'checkout', 'search', 'ingest', 'billing', 'triage', 'research', 'support', 'fraud', 'catalog', 'ml-eval', 'ops', 'docs', 'growth', 'risk', 'infra'];
 
 /**
+ * Options from the page URL: workercap=N (every worker reports N actor
+ * slots, e.g. 1000 like real Substrate) and alloc=0 (workers report no CPU
+ * or memory allocation, like real Substrate today).
+ */
+export function syntheticOptions(params) {
+  return {
+    workerCap: Math.max(0, Number(params.get('workercap')) || 0),
+    resources: params.get('alloc') !== '0',
+  };
+}
+
+/**
  * Builds a snapshot with n agents spread over atespaces of very different
  * sizes (roughly Zipf), mostly suspended, as a large Substrate cluster is.
  */
-export function syntheticSnapshot(n, seed = 7) {
+export function syntheticSnapshot(n, seed = 7, opts = {}) {
   const r = rng(seed);
   const spaces = Math.max(3, Math.min(WORDS.length, Math.round(Math.sqrt(n) / 5)));
   const weights = Array.from({ length: spaces }, (_, i) => 1 / (i + 1));
@@ -111,7 +135,7 @@ export function syntheticSnapshot(n, seed = 7) {
   const now = Date.now();
   const agents = [];
   const atespaces = [];
-  const workers = syntheticWorkers(n, rng(seed + 1));
+  const workers = syntheticWorkers(n, rng(seed + 1), opts);
   const load = new Map();
   let made = 0;
   for (let i = 0; i < spaces; i++) {
@@ -140,7 +164,7 @@ export function syntheticSnapshot(n, seed = 7) {
     }
     made += count;
   }
-  allocate(workers, agents);
+  allocate(workers, agents, opts.resources !== false);
   return { cluster: `synthetic-${n}`, source: 'synthetic', seq: 1, features: { attach: true, mastWeb: true }, sources: [], atespaces, agents, workers };
 }
 
@@ -189,9 +213,10 @@ export function syntheticDetail(a) {
 
 /** Same interface as Stream, fed by syntheticSnapshot plus random churn. */
 export class SyntheticStream {
-  constructor(n, handlers, { every = 1500 } = {}) {
+  constructor(n, handlers, { every = 1500, ...opts } = {}) {
     this.h = handlers;
-    this.snap = syntheticSnapshot(n);
+    this.opts = opts;
+    this.snap = syntheticSnapshot(n, 7, opts);
     this.seq = this.snap.seq;
     this.r = rng(99);
     this.agents = new Map(this.snap.agents.map((a) => [`${a.atespace}/${a.name}`, a]));
@@ -229,7 +254,7 @@ export class SyntheticStream {
       else events.push({ ...base, type: 'agent_crashed', message: 'synthetic crash' });
     }
     // Workers report their new allocations.
-    allocate(this.workers, this.agents.values());
+    allocate(this.workers, this.agents.values(), this.opts.resources !== false);
     for (const w of this.workers) {
       if (touched.has(w.name)) events.push({ type: 'worker_updated', key: w.name, worker: { ...w }, seq: ++this.seq });
     }

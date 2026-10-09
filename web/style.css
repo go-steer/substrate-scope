@@ -1026,6 +1026,15 @@ body.feed-collapsed .feed-tab {
   white-space: nowrap;
 }
 
+.worker-label .use .na {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.worker-label .use.unreported .v {
+  color: var(--muted);
+}
+
 .worker-label .use .bar {
   height: 6px;
   border-radius: 3px;

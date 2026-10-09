@@ -44,10 +44,17 @@ export function padLabelHTML(worker, usage, card) {
   if (!card) return `<div class="name">${name}${state}</div><div class="meta">${agents}${usage.actors.cap ? ` / ${usage.actors.cap}` : ''}</div>`;
   const bar = (label, u, text) =>
     `<div class="use"><span class="k">${label}</span><span class="bar${u.frac >= FULL ? ' full' : ''}"><i style="width:${Math.min(100, u.frac * 100).toFixed(0)}%"></i></span><span class="v">${text}</span></div>`;
+  // A resource the worker doesn't report allocation for says so instead of
+  // drawing an empty bar (ax tasks declare no limits, so real workers
+  // allocate nothing even while they host agents).
+  const missing = (label, u, fmt) =>
+    `<div class="use unreported"><span class="k">${label}</span><span class="na">not reported</span><span class="v">${Number.isFinite(u?.cap) ? `capacity ${fmt(u.cap)}` : ''}</span></div>`;
   const rows = [];
   if (usage.actors.cap) rows.push(bar('Slots', usage.actors, `${n} / ${usage.actors.cap}`));
-  if (usage.cpu) rows.push(bar('CPU', usage.cpu, `${formatCPU(usage.cpu.used)} / ${formatCPU(usage.cpu.cap)} · ${pct(usage.cpu.frac)}`));
-  if (usage.memory) rows.push(bar('Memory', usage.memory, `${formatBytes(usage.memory.used)} / ${formatBytes(usage.memory.cap)}`));
+  if (usage.cpu?.reported) rows.push(bar('CPU', usage.cpu, `${formatCPU(usage.cpu.used)} / ${formatCPU(usage.cpu.cap)} · ${pct(usage.cpu.frac)}`));
+  else rows.push(missing('CPU', usage.cpu, formatCPU));
+  if (usage.memory?.reported) rows.push(bar('Memory', usage.memory, `${formatBytes(usage.memory.used)} / ${formatBytes(usage.memory.cap)}`));
+  else rows.push(missing('Memory', usage.memory, formatBytes));
   const node = worker.node ? `<div class="node">on ${esc(worker.node)}</div>` : '';
   return `<div class="name">${name}${state}</div>${node}<div class="meta">${agents}${usage.actors.cap ? '' : ' · capacity unknown'}</div>${rows.join('')}`;
 }
@@ -143,7 +150,8 @@ export class WorkerPads {
 
   /** Bars for the usage the worker reports: slots, then CPU and memory. */
   layoutBars(p) {
-    const fills = [p.usage.actors.cap ? p.usage.actors.frac : null, p.usage.cpu?.frac ?? null, p.usage.memory?.frac ?? null].filter((f) => f !== null);
+    const fill = (u) => (u?.reported ? u.frac : null);
+    const fills = [p.usage.actors.cap ? p.usage.actors.frac : null, fill(p.usage.cpu), fill(p.usage.memory)].filter((f) => f !== null);
     p.bars.forEach((b, i) => {
       const f = fills[i];
       const on = f !== undefined;

@@ -27,7 +27,7 @@ const { slotPosition, planIsland, SlotTable } = await import('./layout.js');
 const { LinkSet } = await import('./links.js');
 const { WorkerPads, padLabelHTML } = await import('./pads.js');
 const { buildGround } = await import('./island.js');
-const { syntheticSnapshot, SyntheticStream } = await import('./synth.js');
+const { syntheticSnapshot, SyntheticStream, syntheticOptions } = await import('./synth.js');
 const { THEMES } = await import('./themes.js');
 const { Model } = await import('./model.js');
 
@@ -81,6 +81,83 @@ test('worker view: no workers, or nothing parked, still plans', () => {
   // Natural order: w-2 before w-10.
   const order = [...W.planWorkerView([{ name: 'w-10', count: 1 }, { name: 'w-2', count: 1 }], 0).districts.keys()];
   assert.deepEqual(order, [PARKED, 'w-2', 'w-10']);
+});
+
+test('worker view: real capacities (1000 slots) never inflate platforms; agents stay readable', () => {
+  // Real Substrate workers report capacityActors=1000 and host a handful of
+  // agents each; platforms size from what they host, not from 1000.
+  for (let n = 1; n <= 25; n++) {
+    const workers = Array.from({ length: 12 }, (_, i) => ({ name: `w-${i}`, count: i === 0 ? n : i % 3, capacity: 1000 }));
+    const parked = 24;
+    const plan = W.planWorkerView(workers, parked);
+    const d = plan.districts.get('w-0');
+    // Room for the busiest worker's agents plus headroom, nothing like 1000.
+    assert.ok(d.capacity >= n + 1, `n=${n}: holds its agents with room`);
+    assert.ok(d.capacity <= Math.max(W.MIN_WORKER_CELLS * 2, n * 2 + 6), `n=${n}: capacity ${d.capacity} is not sized from 1000`);
+    // Readable: an agent cell is a sizable share of the platform.
+    const cellShare = (1.5 * 1.5) / (d.w * d.d);
+    assert.ok(cellShare > 1 / (n * 3 + 30), `n=${n}: agent cell is ${(cellShare * 100).toFixed(1)}% of the platform`);
+    assert.ok(d.w < 20 && d.d < 20, `n=${n}: platform ${d.w.toFixed(1)}x${d.d.toFixed(1)}`);
+    assert.ok(d.shown <= d.capacity);
+    // The parked area holds its agents with room, and is not a thin strip.
+    const p = plan.districts.get(PARKED);
+    assert.ok(p.capacity >= parked * 1.05, `n=${n}: parked room ${p.capacity}`);
+    assert.ok(p.capacity <= parked * 2.5, `n=${n}: parked area not oversized (${p.capacity})`);
+    assert.ok(p.rows >= 3, `n=${n}: parked area ${p.cols}x${p.rows} is not a strip`);
+    assert.ok(p.w / p.d < 3, `n=${n}: parked area ${p.w.toFixed(1)}x${p.d.toFixed(1)}`);
+    // The island stays a sensible size.
+    assert.ok(plan.width < 90 && plan.depth < 90, `n=${n}: island ${plan.width.toFixed(0)}x${plan.depth.toFixed(0)}`);
+  }
+  // Capacity doesn't change the plan at all.
+  const a = W.planWorkerView([{ name: 'w-0', count: 3, capacity: 1000 }], 10);
+  const b = W.planWorkerView([{ name: 'w-0', count: 3, capacity: 0 }], 10);
+  assert.equal(a.districts.get('w-0').w, b.districts.get('w-0').w);
+  assert.equal(a.districts.get('w-0').capacity, b.districts.get('w-0').capacity);
+});
+
+test('synthetic: workercap=1000 and alloc=0 reproduce real Substrate workers', () => {
+  const opts = syntheticOptions(new URLSearchParams('synthetic=25&workercap=1000&alloc=0'));
+  assert.deepEqual(opts, { workerCap: 1000, resources: false });
+  assert.deepEqual(syntheticOptions(new URLSearchParams('')), { workerCap: 0, resources: true });
+  const snap = syntheticSnapshot(25, 7, opts);
+  for (const w of snap.workers) {
+    assert.equal(w.capacityActors, 1000);
+    assert.equal(w.allocatedCpu, undefined);
+    assert.ok(w.capacityCpu);
+  }
+  const m = new Model();
+  m.applySnapshot(snap);
+  const counts = W.groupCounts(m, 'worker');
+  const workers = [...counts].filter(([k]) => k !== PARKED).map(([name, count]) => ({ name, count, capacity: 1000 }));
+  const d = W.planWorkerView(workers, counts.get(PARKED)).districts.get('w-0');
+  assert.ok(d.capacity < 40, `platform cells ${d.capacity}`);
+});
+
+test('usage: no CPU/memory allocation reported says "not reported", never an empty bar', () => {
+  // Real Substrate today: capacity reported, allocation absent while hosting.
+  const real = W.workerUsage({ name: 'w', capacityActors: 1000, capacityCpu: '8', capacityMemory: '32Gi' }, 1);
+  assert.deepEqual(real.cpu, { reported: false, cap: 8 });
+  assert.equal(real.memory.reported, false);
+  // Zero allocated while hosting agents: also not reported (no limits declared).
+  const zero = W.workerUsage({ name: 'w', capacityCpu: '8', allocatedCpu: '0' }, 2);
+  assert.equal(zero.cpu.reported, false);
+  // Zero allocated and nothing hosted is a real 0%.
+  const idle = W.workerUsage({ name: 'w', capacityCpu: '8', allocatedCpu: '0' }, 0);
+  assert.equal(idle.cpu.reported, true);
+  assert.equal(idle.cpu.frac, 0);
+  const card = padLabelHTML({ name: 'w-1', pod: 'wk-01' }, real, true);
+  assert.match(card, /CPU<\/span><span class="na">not reported/);
+  assert.match(card, /Memory<\/span><span class="na">not reported/);
+  assert.match(card, /capacity 8/);
+  assert.match(card, /capacity 32 GiB/);
+  assert.match(card, /1 \/ 1000/);
+  // Only the slots bar is drawn on the pad.
+  const g = new THREE.Group();
+  const pads = new WorkerPads(g, fakeLabel);
+  pads.sync([{ worker: { name: 'w-1', state: 'ACTIVE' }, x: 0, z: 0, usage: real }], THEMES[0], THREE.AdditiveBlending);
+  const bars = pads.get('w-1').bars.filter((b) => b.track.visible);
+  assert.equal(bars.length, 1);
+  pads.dispose();
 });
 
 test('grouping: agents without a worker are parked; counts include idle workers', () => {
