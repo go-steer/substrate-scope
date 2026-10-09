@@ -24,10 +24,11 @@ kind: Namespace
 metadata:
   name: substrate-scope
 ---
-# Substrate v0.3.0 authorizes only atespace calls; the list calls the
-# collector makes are open to any authenticated service account. Grant
-# Substrate's global viewer role to this account once actor calls are
-# enforced.
+# Substrate v0.4.0 checks ListAtespaces, ListActors and GetActor when its API
+# server runs with --experimental-enable-authz. Then grant this account the
+# global viewer role (member
+# "user:system:serviceaccount:substrate-scope:substrate-scope"); see
+# "Authorization" in docs/design.md. Without enforcement no grant is needed.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

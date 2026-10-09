@@ -78,7 +78,7 @@ Search and filters (atespace, state, name prefix such as `lookout-`) dim everyth
 
 | Source | Calls | Gives |
 |---|---|---|
-| Substrate control API (`api.ate-system.svc:443`, gRPC, TLS) | `ListAtespaces`, `ListActors` (per atespace, paginated), `ListWorkers`, `ListWorkerActorAssignments` | every actor, its state, worker, template, snapshots, crash info; every worker, its node, actor slots and CPU/memory capacity and allocation |
+| Substrate control API (`api.ate-system.svc:443`, gRPC, TLS; v0.4.0 or later) | `ListAtespaces`, `ListActors` (per atespace, paginated), `ListWorkers`, `ListWorkerActorAssignments`; `GetActor` right before reading a runner's status | every actor, its state, worker (and its IPs), template, snapshots, crash info, the node holding a paused actor's snapshot; every worker, its node, IPs, epoch, actor slots and CPU/memory capacity and allocation |
 | ax API (`ax-server.ax-system.svc:8080`, gRPC) | list tasks per atespace | task phase, conditions, idle policy, which actors are ax tasks |
 | ax runner status, via the atenet router with `ate-target-actor` | `GET /metadata/v1alpha1/ax/status`, **running actors only**, and only for the agents in view or selected | idle seconds, in-flight requests, busy, exit |
 | Agent session API, via the router | `GET /sessions`, **running actors only**, on demand | session list (listing does not count as activity in mast) |
@@ -98,7 +98,65 @@ Substrate has no watch API, so the collector polls (default every 2s for actors,
 
 The collector runs as its own service account and authenticates to Substrate with a projected token for audience `api.ate-system.svc`, trusting the servicedns CA bundle (the same mechanism ax-server uses).
 
-On Substrate v0.3.0 authorization only covers atespace calls; every other call is open to any authenticated caller. So the collector's safety comes from its code: it calls only list and get methods, and a test checks it never references a mutating RPC. Substrate's authorization model already has a global **viewer** role that would grant exactly what the collector needs; grant it once actor calls are enforced.
+It targets **Substrate v0.4.0** (the Go module is pinned to v0.4.0, and the authorization notes below are v0.4 behavior). The fields it reads are wire-compatible with v0.3 (`worker_pod_ip` and `Worker.ip` became repeated fields under the same numbers), so a v0.3 API server should still work with the v0.4-only fields left empty, but that is untested. From v0.4 it also shows each worker's IPs (`Worker.ips`, at most one per IP family) and epoch, the IPs of the worker hosting an actor (`WorkerAssignment.worker_pod_ips`; the first non-empty one is `workerIP`), and the node a PAUSED actor's local snapshot is on (`ActorStatus.assigned_node`).
+
+The collector's safety comes from its code: it calls only list and get methods, and tests check it never references a mutating RPC (`TestNeverMutates`, which includes the v0.4 access policy writes) and that its gRPC surface is exactly `ListAtespaces`, `ListActors`, `GetActor`, `ListWorkers` and `ListWorkerActorAssignments` (`TestReadAPIExactSet`).
+
+#### Authorization
+
+Substrate v0.4 adds OpenFGA-backed authorization to the control API. It is enforced only when the API server runs with `--experimental-enable-authz` (or `ATE_API_EXPERIMENTAL_ENABLE_AUTHZ=true`), which also requires `--authz-bootstrap-owners`: principal IDs that are always global owners. Access policy RPCs are checked even when enforcement is off.
+
+What the collector's calls need when it is on:
+
+| Call | Check | Satisfied by |
+|---|---|---|
+| `ListAtespaces` | `can_list_atespaces` on `global:root` | global viewer |
+| `ListActors` (per atespace) | `can_list_actors` on `atespace:<name>` | atespace viewer, inherited from global viewer |
+| `GetActor` | `can_get` on `actor:<atespace>/<name>` | atespace viewer, inherited from global viewer |
+| `ListWorkers`, `ListWorkerActorAssignments` | none (not in the v0.4 authz registry) | any authenticated caller |
+
+So the grant is the **global `viewer`** role (global roles are `owner` and `viewer`; atespaces also have `editor`). It covers atespaces created later too, because every atespace inherits viewers from `global:root`. Granting `viewer` on single atespaces works as well, but `ListAtespaces` then fails and the collector sees nothing.
+
+**Principal ID.** For a bearer token, Substrate's principal is the token's `sub` claim, verbatim and not qualified by issuer (`apiauthn` + `buildJWTProviders` in `cmd/ateapi` at v0.4.0); for a client certificate it is the first URI SAN. A Kubernetes projected service account token has `sub` = `system:serviceaccount:<namespace>:<name>`, so the collector (from `deploy/substrate-scope.yaml`) is `system:serviceaccount:substrate-scope:substrate-scope`, and an access policy member is that ID with a `user:` prefix: `user:system:serviceaccount:substrate-scope:substrate-scope`. (Substrate percent-encodes the colons internally; a PermissionDenied message shows the encoded form, `user:system%3Aserviceaccount%3Asubstrate-scope%3Asubstrate-scope`.) The token's issuer must be one of the API server's `jwtProviders`; `ate-setup` configures the cluster's Kubernetes issuer with audience `api.ate-system.svc`, which is what the collector already uses.
+
+**Granting it.** v0.4's `kubectl-ate` has no access policy commands, so call the API directly (the API server registers gRPC reflection) as a bootstrap owner. The global policy is a singleton named `default`: create it if it doesn't exist, otherwise update it, which replaces the whole binding list and needs the current `uid` and `version`. Bootstrap owners keep access whatever the policy says.
+
+```sh
+# A token for a principal listed in --authz-bootstrap-owners (here a service
+# account ADMIN_NS/ADMIN_SA), and the API server's CA bundle.
+TOKEN=$(kubectl -n ADMIN_NS create token ADMIN_SA --audience api.ate-system.svc --duration 10m)
+kubectl get clustertrustbundles -l podcert.ate.dev/canarying=live \
+  -o jsonpath='{range .items[?(@.spec.signerName=="servicedns.podcert.ate.dev/identity")]}{.spec.trustBundle}{end}' > ca.pem
+kubectl -n ate-system port-forward deploy/ate-api-server 18443:443 &
+ate() { # ate METHOD [JSON]
+  local data=${2:-'{}'}
+  grpcurl -cacert ca.pem -authority api.ate-system.svc -H "authorization: Bearer $TOKEN" \
+    -d "$data" localhost:18443 "ateapi.Control/$1"
+}
+
+# Is there a global policy yet? (NotFound until someone creates it.)
+ate GetGlobalAccessPolicy
+
+# None yet: create it with the collector as global viewer.
+ate CreateGlobalAccessPolicy '{"access_policy": {
+  "metadata": {"name": "default"},
+  "bindings": [{"role": "viewer", "members": ["user:system:serviceaccount:substrate-scope:substrate-scope"]}]
+}}'
+
+# Already there: send back every existing binding plus the new member, with
+# the uid and version from the Get above.
+ate UpdateGlobalAccessPolicy '{"access_policy": {
+  "metadata": {"name": "default", "uid": "UID", "version": "VERSION"},
+  "bindings": [
+    {"role": "viewer", "members": ["user:system:serviceaccount:substrate-scope:substrate-scope", "...existing viewers"]},
+    {"role": "owner", "members": ["...existing owners"]}
+  ]
+}}'
+```
+
+Without the grant, the Substrate source reports an error (the collector adds a hint pointing here to PermissionDenied errors) and no Substrate data comes in.
+
+The collector itself never calls any access policy RPC, not even `GetGlobalAccessPolicy`, so it cannot widen its own access.
 
 ## Simulator
 
@@ -260,4 +318,5 @@ Main-thread cost at 100,000 agents with 1,000 state changes a second (orbiting a
 ## Open questions
 
 - How often can `ListActors` be polled on a large cluster before it bothers Substrate's API server? Paging and per-atespace polling help; a watch API upstream would be better (add to our Substrate asks if polling becomes a problem).
+- The vendored ax proto (`internal/axapi`) comes from the ax fork's `task-idle-suspend-fix` branch, built against Substrate v0.3. The fork's Substrate v0.4 port (branch `substrate-v0.4` of `mastersingh24/ax`) is in progress; re-copy ax.proto from it and regenerate once it lands. Nothing the collector uses is expected to change, since ax's task API doesn't carry Substrate's worker fields.
 - The router-woke signal: ax records `ResumedByRequest` only on our fork (`task-idle-suspend`). Without it, the collector infers a wake from a state change it didn't see an explicit resume for.
