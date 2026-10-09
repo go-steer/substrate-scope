@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Run the collector on your machine against a real cluster, serving web/ from
+# disk so front-end edits show up on reload.
+#
+# It port-forwards Substrate's API server, ax-server and the atenet router,
+# mints a short-lived token for the substrate-scope service account
+# (kubectl apply -f deploy/ first) and fetches the servicedns CA bundle.
+# Credentials go to .dev/ (git-ignored).
+#
+#   CONTEXT=agent-substrate dev/run-local            # UI on http://localhost:8080
+#   ATTACH_TOKEN_FILE=path dev/run-local             # also enable the attach proxy
+set -euo pipefail
+cd "$(dirname "$0")/.."
+CONTEXT=${CONTEXT:-$(kubectl config current-context)}
+K="kubectl --context $CONTEXT"
+mkdir -p .dev
+chmod 700 .dev
+
+$K -n substrate-scope create token substrate-scope --audience api.ate-system.svc --duration 2h > .dev/ate-token
+$K get clustertrustbundles -l podcert.ate.dev/canarying=live \
+  -o jsonpath='{range .items[?(@.spec.signerName=="servicedns.podcert.ate.dev/identity")]}{.spec.trustBundle}{end}' > .dev/ca.pem
+
+pids=()
+cleanup() { kill "${pids[@]}" 2>/dev/null || true; }
+trap cleanup EXIT
+$K -n ate-system port-forward deploy/ate-api-server 18443:443 >/dev/null & pids+=($!)
+$K -n ax-system port-forward svc/ax-server 18080:8080 >/dev/null & pids+=($!)
+$K -n ate-system port-forward svc/atenet-router 18081:80 >/dev/null & pids+=($!)
+sleep 2
+
+attach=()
+if [[ -n "${ATTACH_TOKEN_FILE:-}" ]]; then attach=(--attach-token-file="$ATTACH_TOKEN_FILE"); fi
+go run ./cmd/substrate-scope \
+  --addr="${ADDR:-127.0.0.1:8080}" \
+  --cluster="$CONTEXT" \
+  --web-dir=web \
+  --substrate-endpoint=127.0.0.1:18443 \
+  --substrate-authority=api.ate-system.svc \
+  --substrate-token-file=.dev/ate-token \
+  --substrate-ca-file=.dev/ca.pem \
+  --ax-endpoint=127.0.0.1:18080 \
+  --router=127.0.0.1:18081 \
+  "${attach[@]}" "$@"

@@ -1,6 +1,6 @@
 # substrate-scope design
 
-**Status:** draft, 2026-10-08.
+**Status:** milestone 1 implemented (2026-10-08); milestones 2 to 4 open.
 
 substrate-scope shows every agent on [Agent Substrate](https://github.com/agent-substrate/substrate) as a live 3D scene: which agents are running, which are suspended, which just woke up or crashed, per cluster and per atespace. Where an agent is an [Agent Executor (ax)](https://github.com/google/ax) task, it adds what ax knows (phase, why it was suspended, idle time) and lets you open the agent's own session, for example a mast triage started by k8s-lookout.
 

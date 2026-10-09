@@ -1,0 +1,99 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package substrate
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"testing"
+
+	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"google.golang.org/grpc"
+)
+
+// fakeAPI serves n actors in pages of the requested size.
+type fakeAPI struct {
+	readAPI
+	actors   int
+	calls    int
+	badToken bool
+}
+
+func (f *fakeAPI) ListActors(_ context.Context, in *ateapipb.ListActorsRequest, _ ...grpc.CallOption) (*ateapipb.ListActorsResponse, error) {
+	f.calls++
+	start := 0
+	if in.GetPageToken() != "" {
+		var err error
+		if start, err = strconv.Atoi(in.GetPageToken()); err != nil {
+			return nil, err
+		}
+	}
+	resp := &ateapipb.ListActorsResponse{}
+	end := min(start+int(in.GetPageSize()), f.actors)
+	for i := start; i < end; i++ {
+		resp.Actors = append(resp.Actors, &ateapipb.Actor{
+			Metadata: &ateapipb.ResourceMetadata{Atespace: in.GetAtespace(), Name: fmt.Sprintf("a%03d", i)},
+			Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED},
+		})
+	}
+	if end < f.actors {
+		resp.NextPageToken = strconv.Itoa(end)
+		if f.badToken {
+			resp.NextPageToken = "same"
+		}
+	}
+	return resp, nil
+}
+
+func TestListActorsPaginates(t *testing.T) {
+	f := &fakeAPI{actors: 1234}
+	c := newClient(f)
+	c.PageSize = 100
+	got, err := c.ListActors(context.Background(), "cred-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1234 || f.calls != 13 {
+		t.Fatalf("got %d actors in %d calls, want 1234 in 13", len(got), f.calls)
+	}
+	if got[1233].GetMetadata().GetName() != "a1233" {
+		t.Fatalf("last actor = %s", got[1233].GetMetadata().GetName())
+	}
+}
+
+func TestListActorsStopsOnRepeatedToken(t *testing.T) {
+	f := &fakeAPI{actors: 1000, badToken: true}
+	c := newClient(f)
+	c.PageSize = 10
+	if _, err := c.ListActors(context.Background(), "x"); err == nil {
+		t.Fatal("expected an error for a repeated page token")
+	}
+}
+
+func TestToAgent(t *testing.T) {
+	a := ToAgent(&ateapipb.Actor{
+		Metadata:      &ateapipb.ResourceMetadata{Atespace: "cred-test", Name: "mast-triage", Uid: "u1"},
+		ActorTemplate: &ateapipb.ObjectRef{Atespace: "cred-test", Name: "ax-mast-triage"},
+		Status: &ateapipb.ActorStatus{
+			State:            ateapipb.ActorState_ACTOR_STATE_RUNNING,
+			WorkerAssignment: &ateapipb.WorkerAssignment{Worker: &ateapipb.ObjectRef{Name: "w-1"}, WorkerPod: "atelet-abc", NodeName: "node-1"},
+			ExternalSnapshot: &ateapipb.ExternalSnapshot{SnapshotUri: "gs://b/s"},
+		},
+	})
+	if a.State != "RUNNING" || a.Worker != "w-1" || a.WorkerPod != "atelet-abc" || a.Template != "cred-test/ax-mast-triage" || a.SnapshotURI != "gs://b/s" {
+		t.Fatalf("ToAgent = %+v", a)
+	}
+}
