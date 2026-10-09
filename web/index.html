@@ -85,6 +85,15 @@
       <span id="clock"></span>
     </footer>
 
+    <div id="zoomctl" role="group" aria-label="Zoom">
+      <button id="zoom-in" title="Zoom in (+)" aria-label="Zoom in">+</button>
+      <button id="zoom-out" title="Zoom out (−)" aria-label="Zoom out">−</button>
+      <div class="scrollmode" role="group" aria-label="Scroll" title="What scrolling does. Auto: a mouse wheel zooms and a trackpad scroll pans. Zoom: every scroll zooms, Shift+scroll pans (use this with a Magic Mouse). Pan: every scroll pans. Control+scroll always zooms.">
+        <span>Scroll</span>
+        <button data-scroll="auto">auto</button><button data-scroll="zoom">zoom</button><button data-scroll="pan">pan</button>
+      </div>
+    </div>
+
     <div id="tooltip"></div>
 
     <script type="module" src="js/main.js"></script>

@@ -622,3 +622,20 @@ test('wheel: mouse wheels and pinches zoom, trackpad scrolls pan', () => {
   assert.equal(w.classify({ deltaX: 0, deltaY: 120, deltaMode: 0, ctrlKey: false }, 3100), 'pan');
   assert.equal(w.classify({ deltaX: 0, deltaY: 120, deltaMode: 0, ctrlKey: false }, 5000), 'zoom');
 });
+
+// A Magic Mouse swipe sends small pixel deltas, exactly like a trackpad, so
+// 'auto' pans with it. 'zoom' mode makes every scroll zoom (Shift+scroll
+// pans); 'pan' makes every scroll pan; Control always zooms.
+test('wheel: scroll mode overrides the wheel/trackpad guess', () => {
+  const swipe = { deltaX: 0, deltaY: 6.5, deltaMode: 0, ctrlKey: false, shiftKey: false };
+  const w = new D.WheelKind();
+  assert.equal(w.classify(swipe, 0), 'pan', 'auto: a Magic Mouse swipe pans');
+  w.mode = 'zoom';
+  assert.equal(w.classify(swipe, 1000), 'zoom');
+  assert.equal(w.classify({ ...swipe, shiftKey: true }, 2000), 'pan', 'Shift+scroll pans in zoom mode');
+  w.mode = 'pan';
+  assert.equal(w.classify({ deltaX: 0, deltaY: 100, deltaMode: 0, ctrlKey: false, shiftKey: false }, 3000), 'pan');
+  assert.equal(w.classify({ ...swipe, ctrlKey: true }, 4000), 'zoom', 'Control+scroll always zooms');
+  assert.equal(D.scrollModeId('zoom'), 'zoom');
+  assert.equal(D.scrollModeId('sideways'), 'auto');
+});

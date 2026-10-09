@@ -567,14 +567,28 @@ export function bezier(a, c1, c2, p, t) {
  * axis; trackpads send small, fractional or two-axis deltas, in streams, so
  * once a stream looks like a trackpad it stays one until it pauses.
  */
+/** Scroll modes: auto guesses wheel vs trackpad; zoom and pan force one. */
+export const SCROLL_MODES = ['auto', 'zoom', 'pan'];
+
+/** A valid scroll mode for v, defaulting to auto. */
+export function scrollModeId(v) {
+  return SCROLL_MODES.includes(v) ? v : 'auto';
+}
+
 export class WheelKind {
   constructor() {
     this.padUntil = -Infinity;
+    // 'auto' tells mouse wheels (zoom) from trackpad scrolls (pan) by their
+    // deltas. A Magic Mouse swipe looks exactly like a trackpad scroll, so
+    // its users need 'zoom': every scroll zooms and Shift+scroll pans.
+    this.mode = 'auto';
   }
 
-  /** 'zoom' or 'pan' for a wheel event ({deltaX, deltaY, deltaMode, ctrlKey}) at time now (ms). */
+  /** 'zoom' or 'pan' for a wheel event ({deltaX, deltaY, deltaMode, ctrlKey, shiftKey}) at time now (ms). */
   classify(e, now) {
     if (e.ctrlKey) return 'zoom';
+    if (this.mode === 'zoom') return e.shiftKey ? 'pan' : 'zoom';
+    if (this.mode === 'pan') return 'pan';
     const wheel = e.deltaMode !== 0 || (e.deltaX === 0 && Number.isInteger(e.deltaY) && Math.abs(e.deltaY) >= 50);
     if (!wheel || now < this.padUntil) {
       this.padUntil = now + 300;

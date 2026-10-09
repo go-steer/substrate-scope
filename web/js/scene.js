@@ -1683,6 +1683,17 @@ export class Scene {
     return t * cos;
   }
 
+  /** Zooms by factor (<1 in, >1 out) along the view toward the orbit target, within the controls' distance limits. */
+  zoomBy(factor) {
+    if (this.cameraDriver) return;
+    const c = this.controls;
+    const off = this.camera.position.clone().sub(c.target);
+    const d = Math.min(c.maxDistance, Math.max(c.minDistance, off.length() * factor));
+    this.camera.position.copy(c.target).add(off.setLength(d));
+    this.camera.updateMatrixWorld();
+    this.flyAnim = null;
+  }
+
   /** Pans the camera in the screen plane by pixels (right and down positive), at depth (the point there tracks the pointer). */
   panScreen(dxPx, dyPx, depth) {
     if (this.cameraDriver) return;

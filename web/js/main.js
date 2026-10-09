@@ -24,7 +24,7 @@ import { describe } from './feed.js';
 import { SyntheticStream, syntheticDetail, syntheticOptions } from './synth.js';
 import { ThemePicker } from './theming.js';
 import { LookPicker, initialLooks, rememberGroup, rememberLayout, rememberBeams, storedDecks, storeDecks } from './looks.js';
-import { DECK_KEYS, layoutId, beamModeId } from './decks.js';
+import { DECK_KEYS, layoutId, beamModeId, scrollModeId } from './decks.js';
 import { inkOn } from './themes.js';
 import { PerfOverlay } from './perf.js';
 
@@ -549,6 +549,26 @@ const perf = new PerfOverlay(
   }),
   { visible: params.get('perf') === '1' || params.get('bench') === '1' },
 );
+// Scroll: auto (wheel zooms, trackpad scroll pans), zoom (every scroll zooms,
+// Shift+scroll pans; for a Magic Mouse), or pan. ?scroll= overrides; remembered.
+const SCROLL_KEY = 'substrate-scope:scroll';
+function setScroll(mode, remember = true) {
+  const m = scrollModeId(mode);
+  scene.gestures.wheel.mode = m;
+  document.querySelectorAll('#zoomctl [data-scroll]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.scroll === m)));
+  if (remember) localStorage.setItem(SCROLL_KEY, m);
+}
+setScroll(new URLSearchParams(location.search).get('scroll') || localStorage.getItem(SCROLL_KEY) || 'auto', false);
+document.querySelectorAll('#zoomctl [data-scroll]').forEach((b) => b.addEventListener('click', () => setScroll(b.dataset.scroll)));
+$('#zoom-in').addEventListener('click', () => scene.zoomBy(1 / 1.25));
+$('#zoom-out').addEventListener('click', () => scene.zoomBy(1.25));
+document.addEventListener('keydown', (e) => {
+  const typing = document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'SELECT';
+  if (typing || e.metaKey || e.ctrlKey) return;
+  if (e.key === '+' || e.key === '=') scene.zoomBy(1 / 1.25);
+  if (e.key === '-' || e.key === '_') scene.zoomBy(1.25);
+});
+
 document.addEventListener('keydown', (e) => {
   if (e.key === 'p' && document.activeElement?.tagName !== 'INPUT') perf.el.hidden = !perf.el.hidden;
 });
