@@ -28,9 +28,8 @@ export function rng(seed) {
   };
 }
 
-const WORKERS = 12;
-/** The last worker is draining: it keeps its agents but gets no new ones. */
-const DRAINING = WORKERS - 1;
+/** Workers when the URL doesn't ask for a number (the old default). */
+export const DEFAULT_WORKERS = 12;
 
 /** States that hold a worker (running, and on their way in or out). */
 const HOLDS_WORKER = new Set(['RUNNING', 'RESUMING', 'SUSPENDING']);
@@ -43,49 +42,83 @@ export function agentRequest(key) {
   return { cpu, memory: cpu * 2 * 2 ** 30 };
 }
 
-/**
- * Workers sized for n agents: about a tenth of agents hold a worker at a
- * time; each worker gets 1.4x to 2.2x its share of actor slots, and CPU and
- * memory to match (4 GiB per core), so fills differ from worker to worker.
- */
-export function syntheticWorkers(n, r, { workerCap = 0 } = {}) {
-  const share = Math.max(4, (n * 0.1) / WORKERS);
-  return Array.from({ length: WORKERS }, (_, i) => {
-    const sized = Math.max(8, Math.round(share * (1.4 + r() * 0.8)));
-    // workerCap: every worker reports this many actor slots (real Substrate
-    // workers say 1000), whatever they host; CPU and memory stay sized.
-    const capacityActors = workerCap > 0 ? workerCap : sized;
-    const cores = Math.max(4, Math.ceil((sized * 0.5) / 4) * 4);
-    return {
-      name: `w-${i}`,
-      pod: `wk-${String(i).padStart(2, '0')}`,
-      node: `gke-pool-${i % 4}-${(0x3a1f + i * 977).toString(16)}`,
-      pool: 'default',
-      state: i === DRAINING ? 'DRAINING' : 'ACTIVE',
-      capacityActors,
-      capacityCpu: String(cores),
-      capacityMemory: `${cores * 4}Gi`,
-    };
-  });
+const POOL_KINDS = ['general', 'highmem', 'burst', 'spot', 'batch', 'gpu-l4', 'compute', 'arm'];
+
+/** True for the workers that are draining: the last one, and about one in 200 of a big fleet. */
+export function isDraining(i, count) {
+  return i === count - 1 || (count > 50 && i % 197 === 101);
 }
 
-/** Picks a worker for an agent: weighted by free slots, never the draining one. */
-function pickWorker(r, workers, load) {
-  const free = workers.map((w, i) => (i === DRAINING ? 0 : Math.max(0.5, w.capacityActors - (load.get(w.name) || 0))));
-  let x = r() * free.reduce((a, b) => a + b, 0);
-  for (let i = 0; i < workers.length; i++) {
-    x -= free[i];
-    if (x <= 0) return workers[i].name;
+/**
+ * Workers sized for n agents, in node pools of 20 to 100 workers with 2 to
+ * 8 workers per node (a fleet of 12 is one pool). About a tenth of agents
+ * hold a worker at a time; each worker gets 1.4x to 2.2x its share of actor
+ * slots (or workerCap slots, like real Substrate's 1000), and CPU and memory
+ * to match (4 GiB per core), so fills differ from worker to worker.
+ */
+export function syntheticWorkers(n, r, { workerCap = 0, workers: count = DEFAULT_WORKERS } = {}) {
+  count = Math.max(1, Math.floor(count));
+  const share = Math.max(4, (n * 0.1) / count);
+  const out = [];
+  let pool = 0;
+  while (out.length < count) {
+    const size = count <= 100 ? count : Math.min(count - out.length, 20 + Math.floor(r() * 81));
+    const perNode = 2 + Math.floor(r() * 7);
+    const poolName = count <= 100 ? 'default' : `${POOL_KINDS[pool % POOL_KINDS.length]}-${String.fromCharCode(97 + Math.floor(pool / POOL_KINDS.length) % 26)}${pool >= POOL_KINDS.length * 26 ? pool : ''}`;
+    for (let k = 0; k < size; k++) {
+      const i = out.length;
+      const sized = Math.max(8, Math.round(share * (1.4 + r() * 0.8)));
+      // workerCap: every worker reports this many actor slots (real Substrate
+      // workers say 1000), whatever they host; CPU and memory stay sized.
+      const capacityActors = workerCap > 0 ? workerCap : sized;
+      const cores = Math.max(4, Math.ceil((sized * 0.5) / 4) * 4);
+      const nodeIx = count <= 100 ? i % 4 : Math.floor(k / perNode);
+      const node = count <= 100 ? `gke-pool-${nodeIx}-${(0x3a1f + i * 977).toString(16)}` : `gke-${poolName}-${(0x3a1f + pool * 7919 + nodeIx * 977).toString(16)}`;
+      out.push({
+        name: `w-${i}`,
+        pod: count <= 100 ? `wk-${String(i).padStart(2, '0')}` : `wk-${poolName}-${String(k).padStart(3, '0')}`,
+        node,
+        pool: poolName,
+        state: isDraining(i, count) ? 'DRAINING' : 'ACTIVE',
+        capacityActors,
+        capacityCpu: String(cores),
+        capacityMemory: `${cores * 4}Gi`,
+      });
+    }
+    pool++;
   }
-  return workers[0].name;
+  return out;
 }
 
 /**
- * Fills in each worker's allocated slots, CPU and memory from the agents it
- * holds. With resources false, CPU and memory allocation are left out, as
- * real Substrate reports them while ax tasks declare no limits.
+ * Picks a worker for an agent, weighted by free slots and never a draining
+ * one, in O(1): a few random tries accepted in proportion to free room.
+ * load: Map name -> agents held.
  */
-export function allocate(workers, agents, resources = true) {
+function pickWorker(r, workers, load) {
+  for (let t = 0; t < 16; t++) {
+    const w = workers[Math.floor(r() * workers.length)];
+    if (w.state === 'DRAINING') continue;
+    const free = Math.max(0.5, w.capacityActors - (load.get(w.name) || 0));
+    if (r() * w.capacityActors <= free) return w.name;
+  }
+  return (workers.find((w) => w.state !== 'DRAINING') || workers[0]).name;
+}
+
+/** Writes a worker's allocation from its use ({n, cpu, mem}). */
+function writeAllocation(w, u, resources) {
+  w.allocatedActors = u.n;
+  if (!resources) {
+    delete w.allocatedCpu;
+    delete w.allocatedMemory;
+    return;
+  }
+  w.allocatedCpu = `${Math.round(u.cpu * 1000)}m`;
+  w.allocatedMemory = `${Math.round(u.mem / 2 ** 20)}Mi`;
+}
+
+/** Each worker's use ({n, cpu, mem}) from the agents it holds. */
+export function workerUse(workers, agents) {
   const use = new Map(workers.map((w) => [w.name, { n: 0, cpu: 0, mem: 0 }]));
   for (const a of agents) {
     const u = a.worker && use.get(a.worker);
@@ -95,65 +128,89 @@ export function allocate(workers, agents, resources = true) {
     u.cpu += req.cpu;
     u.mem += req.memory;
   }
-  for (const w of workers) {
-    const u = use.get(w.name);
-    w.allocatedActors = u.n;
-    if (!resources) {
-      delete w.allocatedCpu;
-      delete w.allocatedMemory;
-      continue;
-    }
-    w.allocatedCpu = `${Math.round(u.cpu * 1000)}m`;
-    w.allocatedMemory = `${Math.round(u.mem / 2 ** 20)}Mi`;
-  }
+  return use;
+}
+
+/**
+ * Fills in each worker's allocated slots, CPU and memory from the agents it
+ * holds. With resources false, CPU and memory allocation are left out, as
+ * real Substrate reports them while ax tasks declare no limits.
+ */
+export function allocate(workers, agents, resources = true) {
+  const use = workerUse(workers, agents);
+  for (const w of workers) writeAllocation(w, use.get(w.name), resources);
   return workers;
+}
+
+/**
+ * Options from the page URL: workers=N (a fleet of N workers in node pools),
+ * churn=N (state changes per second), workercap=N (every worker reports N
+ * actor slots, e.g. 1000 like real Substrate) and alloc=0 (workers report
+ * no CPU or memory allocation, like real Substrate today).
+ */
+export function syntheticOptions(params) {
+  const out = {
+    workerCap: Math.max(0, Number(params.get('workercap')) || 0),
+    resources: params.get('alloc') !== '0',
+  };
+  const workers = Number(params.get('workers'));
+  if (workers > 0) out.workers = Math.min(20000, Math.floor(workers));
+  if (params.has('churn') && Number.isFinite(Number(params.get('churn')))) out.churn = Math.max(0, Number(params.get('churn')));
+  return out;
+}
+
+/** Odds a picked agent that isn't running wakes: running share f = odds / (1 + odds), about 10%. */
+const WAKE_ODDS = 0.11;
+
+/** State changes per second by default: a couple for small scenes, 1% of agents per second at scale (1,000/s at 100k). */
+export function defaultChurn(n) {
+  return n >= 10000 ? n / 100 : 2;
 }
 
 const WORDS = ['payments', 'checkout', 'search', 'ingest', 'billing', 'triage', 'research', 'support', 'fraud', 'catalog', 'ml-eval', 'ops', 'docs', 'growth', 'risk', 'infra'];
 
-/**
- * Options from the page URL: workercap=N (every worker reports N actor
- * slots, e.g. 1000 like real Substrate) and alloc=0 (workers report no CPU
- * or memory allocation, like real Substrate today).
- */
-export function syntheticOptions(params) {
-  return {
-    workerCap: Math.max(0, Number(params.get('workercap')) || 0),
-    resources: params.get('alloc') !== '0',
-  };
+
+/** Atespace name i: the words, then the words again with a suffix (big clusters have many). */
+function spaceName(i) {
+  const w = WORDS[i % WORDS.length];
+  return i < WORDS.length ? w : `${w}-${Math.floor(i / WORDS.length) + 1}`;
 }
 
 /**
  * Builds a snapshot with n agents spread over atespaces of very different
  * sizes (roughly Zipf), mostly suspended, as a large Substrate cluster is.
+ * opts: workers (fleet size), workerCap, resources (see syntheticOptions).
  */
 export function syntheticSnapshot(n, seed = 7, opts = {}) {
   const r = rng(seed);
-  const spaces = Math.max(3, Math.min(WORDS.length, Math.round(Math.sqrt(n) / 5)));
+  const spaces = Math.max(3, Math.min(48, Math.round(Math.sqrt(n) / 5)));
   const weights = Array.from({ length: spaces }, (_, i) => 1 / (i + 1));
   const total = weights.reduce((a, b) => a + b, 0);
   const now = Date.now();
   const agents = [];
   const atespaces = [];
   const workers = syntheticWorkers(n, rng(seed + 1), opts);
+  const draining = workers.filter((w) => w.state === 'DRAINING');
   const load = new Map();
   let made = 0;
   for (let i = 0; i < spaces; i++) {
-    const name = WORDS[i];
+    const name = spaceName(i);
     atespaces.push({ name });
     const count = i === spaces - 1 ? n - made : Math.round((weights[i] / total) * n);
+    const short = name.slice(0, 4) + (i >= WORDS.length ? Math.floor(i / WORDS.length) + 1 : '');
     for (let j = 0; j < count; j++) {
       const x = r();
       const state = x < 0.08 ? 'RUNNING' : x < 0.09 ? 'CRASHED' : x < 0.1 ? 'RESUMING' : 'SUSPENDED';
       let worker;
       if (HOLDS_WORKER.has(state)) {
-        // The draining worker still holds some agents from before it drained.
-        worker = r() < 0.04 ? workers[DRAINING].name : pickWorker(r, workers, load);
+        // Draining workers still hold some agents from before they drained
+        // (about as many as any other worker).
+        worker = r() < Math.max(0.04, draining.length / workers.length) ? draining[Math.floor(r() * draining.length)].name : pickWorker(r, workers, load);
         load.set(worker, (load.get(worker) || 0) + 1);
       }
       agents.push({
         atespace: name,
-        name: `${name.slice(0, 4)}-agent-${String(j).padStart(4, '0')}`,
+        name: `${short}-agent-${String(j).padStart(4, '0')}`,
         state,
         stateSince: new Date(now - r() * 3600e3).toISOString(),
         createTime: new Date(now - 86400e3 - r() * 30 * 86400e3).toISOString(),
@@ -189,16 +246,17 @@ function syntheticTask(state, at) {
 }
 
 /** The panel's agent detail for a synthetic agent (what the collector's API would say). */
-export function syntheticDetail(a) {
+export function syntheticDetail(a, workers) {
   if (!a) return null;
   const r = rng([...a.name].reduce((h, c) => h * 31 + c.charCodeAt(0), 7));
   const running = a.state === 'RUNNING';
+  const wk = a.worker ? workers?.get(a.worker) : null;
   const i = a.worker ? Number(a.worker.slice(2)) : -1;
-  const worker = a.worker ? { name: a.worker, pod: `wk-${String(i).padStart(2, '0')}` } : null;
+  const worker = a.worker ? { name: a.worker, pod: wk?.pod || `wk-${String(i).padStart(2, '0')}` } : null;
   const agent = {
     ...a,
     workerPod: worker?.pod,
-    workerNode: worker && `gke-pool-${i % 4}-${(0x3a1f + i * 977).toString(16)}`,
+    workerNode: worker && (wk?.node || `gke-pool-${i % 4}-${(0x3a1f + i * 977).toString(16)}`),
     snapshotURI: running ? '' : `gs://snapshots/${a.atespace}/${a.name}/0042`,
     uid: `${Math.floor(r() * 1e8).toString(16)}-synthetic`,
     crash: a.state === 'CRASHED' ? { message: a.task?.conditions?.[0]?.message || 'synthetic crash', time: a.stateSince } : undefined,
@@ -211,9 +269,15 @@ export function syntheticDetail(a) {
   };
 }
 
-/** Same interface as Stream, fed by syntheticSnapshot plus random churn. */
+/**
+ * Same interface as Stream, fed by syntheticSnapshot plus random churn:
+ * churn state changes per second (default: defaultChurn(n)), in batches
+ * every 100 ms at scale, or three every 1.5 s for small scenes. Worker
+ * load and allocation are kept incrementally, so a batch costs what it
+ * changes, not what the cluster holds.
+ */
 export class SyntheticStream {
-  constructor(n, handlers, { every = 1500, ...opts } = {}) {
+  constructor(n, handlers, { every, churn, ...opts } = {}) {
     this.h = handlers;
     this.opts = opts;
     this.snap = syntheticSnapshot(n, 7, opts);
@@ -222,29 +286,60 @@ export class SyntheticStream {
     this.agents = new Map(this.snap.agents.map((a) => [`${a.atespace}/${a.name}`, a]));
     this.keys = [...this.agents.keys()];
     this.workers = this.snap.workers.map((w) => ({ ...w }));
+    this.byName = new Map(this.workers.map((w) => [w.name, w]));
+    this.use = workerUse(this.workers, this.agents.values());
+    this.load = new Map([...this.use].map(([k, u]) => [k, u.n]));
+    this.rate = churn ?? defaultChurn(n);
+    // Small scenes: three changes every 1.5 s (as before); at scale, a
+    // batch every 100 ms so the rate stays smooth.
+    const slow = this.rate <= 2;
+    this.every = every ?? (slow ? 1500 : 100);
+    this.perTick = slow ? 3 : (this.rate * this.every) / 1000;
+    this.carry = 0;
     setTimeout(() => {
       this.h.onStatus('live');
       this.h.onSnapshot(this.snap, false);
     }, 0);
-    this.timer = setInterval(() => this.churn(), every);
+    this.timer = this.rate > 0 ? setInterval(() => this.churn(), this.every) : null;
+  }
+
+  /** Moves an agent's request between workers' use. */
+  account(agent, worker, sign) {
+    const u = worker && this.use.get(worker);
+    if (!u) return;
+    const req = agentRequest(`${agent.atespace}/${agent.name}`);
+    u.n += sign;
+    u.cpu += sign * req.cpu;
+    u.mem += sign * req.memory;
+    this.load.set(worker, u.n);
   }
 
   churn() {
     const events = [];
     const now = new Date().toISOString();
-    const load = new Map();
-    for (const a of this.agents.values()) if (a.worker) load.set(a.worker, (load.get(a.worker) || 0) + 1);
     const touched = new Set();
-    for (let i = 0; i < 3; i++) {
+    this.carry += this.perTick;
+    const count = Math.floor(this.carry);
+    this.carry -= count;
+    for (let i = 0, tries = 0; i < count && tries < count * 40; tries++) {
       const key = this.keys[Math.floor(this.r() * this.keys.length)];
       const prev = this.agents.get(key);
-      let to = prev.state === 'RUNNING' ? 'SUSPENDED' : 'RUNNING';
-      if (this.r() < 0.05) to = 'CRASHED';
-      const worker = to === 'RUNNING' ? pickWorker(this.r, this.workers, load) : undefined;
-      if (prev.worker) touched.add(prev.worker);
+      // Running agents suspend (or crash); others wake, but only WAKE_ODDS
+      // of the time they are picked, so the running share stays near its
+      // start (about a tenth) however long the churn runs.
+      const running = prev.state === 'RUNNING';
+      if (!running && this.r() > WAKE_ODDS) continue;
+      i++;
+      let to = running ? 'SUSPENDED' : 'RUNNING';
+      if (running && this.r() < 0.03) to = 'CRASHED';
+      if (prev.worker) {
+        touched.add(prev.worker);
+        this.account(prev, prev.worker, -1);
+      }
+      const worker = to === 'RUNNING' ? pickWorker(this.r, this.workers, this.load) : undefined;
       if (worker) {
         touched.add(worker);
-        load.set(worker, (load.get(worker) || 0) + 1);
+        this.account(prev, worker, 1);
       }
       const agent = { ...prev, state: to, stateSince: now, task: syntheticTask(to, Date.now()), worker };
       this.agents.set(key, agent);
@@ -254,11 +349,13 @@ export class SyntheticStream {
       else events.push({ ...base, type: 'agent_crashed', message: 'synthetic crash' });
     }
     // Workers report their new allocations.
-    allocate(this.workers, this.agents.values(), this.opts.resources !== false);
-    for (const w of this.workers) {
-      if (touched.has(w.name)) events.push({ type: 'worker_updated', key: w.name, worker: { ...w }, seq: ++this.seq });
+    for (const name of touched) {
+      const w = this.byName.get(name);
+      if (!w) continue;
+      writeAllocation(w, this.use.get(name), this.opts.resources !== false);
+      events.push({ type: 'worker_updated', key: name, worker: { ...w }, seq: ++this.seq });
     }
-    this.h.onEvents(events);
+    if (events.length) this.h.onEvents(events);
   }
 
   close() {

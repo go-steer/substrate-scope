@@ -19,14 +19,19 @@ import { Model, CLASSES, CLASS_LABEL, makeFilter, stateClass } from './model.js'
 import { Stream, streamURL } from './stream.js';
 import { Scene, cssColor } from './scene.js';
 import { Panel } from './panel.js';
-import { esc, duration, since, clock, workerLabel } from './format.js';
+import { esc, duration, since, clock, workerLabel, compact } from './format.js';
 import { describe } from './feed.js';
 import { SyntheticStream, syntheticDetail, syntheticOptions } from './synth.js';
 import { ThemePicker } from './theming.js';
-import { LookPicker, initialLooks, rememberGroup } from './looks.js';
+import { LookPicker, initialLooks, rememberGroup, rememberLayout, rememberBeams, storedDecks, storeDecks } from './looks.js';
+import { DECK_KEYS, layoutId, beamModeId, scrollModeId } from './decks.js';
 import { inkOn } from './themes.js';
+import { PerfOverlay } from './perf.js';
+import { ControlsTour } from './tour-ui.js';
 
 const $ = (sel) => document.querySelector(sel);
+/** Short state names for the header chips on narrower screens. */
+const CLASS_ABBR = { running: 'Run', transition: 'Chg', suspended: 'Susp', crashed: 'Crash', pending: 'Pend' };
 
 const model = new Model();
 const filterState = { atespace: '', classes: new Set(CLASSES), prefix: '' };
@@ -35,6 +40,7 @@ let selected = null;
 const eventCounts = {};
 
 const looks0 = initialLooks();
+const params = new URLSearchParams(window.location.search);
 const scene = new Scene(
   $('#viewport'),
   {
@@ -42,15 +48,51 @@ const scene = new Scene(
     onHover: (key, x, y) => hover(key, x, y),
     onHoverWorker: (name) => {
       hoverWorker = name;
-      document.body.style.cursor = name ? 'pointer' : '';
+      updateCursor();
+    },
+    onHoverTile: (tile, info) => hoverTile(tile, info),
+    onDeckHandle: (h) => {
+      deckHandle = h;
+      updateCursor();
+    },
+    onDrag: (kind) => {
+      dragKind = kind;
+      updateCursor();
+    },
+    onDecksChanged: (o) => {
+      storeDecks(o);
+      showDeckLink();
     },
   },
-  { shape: looks0.agents, router: looks0.router, extras: looks0.extras, group: looks0.group },
+  {
+    shape: looks0.agents,
+    router: looks0.router,
+    extras: looks0.extras,
+    group: looks0.group,
+    layout: looks0.layout,
+    beams: looks0.beams,
+    budget: Number(params.get('budget')) || undefined,
+    quality: params.get('quality') || 'auto',
+  },
 );
 let hoverWorker = null;
+let deckHandle = null;
+let dragKind = null;
+// Deck offsets and the link state from the last visit.
+scene.setDeckOffsets(storedDecks());
+
+/** The pointer: grabbing while dragging, move over a deck's rim, pointer over an agent or worker. */
+function updateCursor() {
+  let c = '';
+  if (dragKind === 'deck') c = 'grabbing';
+  else if (dragKind === 'pan') c = 'move';
+  else if (deckHandle) c = 'move';
+  else if (hovered || hoverWorker) c = 'pointer';
+  document.body.style.cursor = c;
+}
 // ?synthetic=N replaces the collector with N generated agents (scale checks
 // and design work without a cluster).
-const synthetic = Number(new URLSearchParams(window.location.search).get('synthetic')) || 0;
+const synthetic = Number(params.get('synthetic')) || 0;
 scene.setFakeActivity(synthetic > 0);
 
 // Router look and agent shape: switch live, remembered.
@@ -70,7 +112,7 @@ const panel = new Panel($('#panel'), {
     scene.flyToWorker(name);
   },
   features: () => model.features,
-  detail: synthetic > 0 ? (key) => syntheticDetail(model.agents.get(key)) : undefined,
+  detail: synthetic > 0 ? (key) => syntheticDetail(model.agents.get(key), model.workers) : undefined,
 });
 
 // Themes: switching re-colors the page (CSS variables), the scene, the open
@@ -101,7 +143,7 @@ const streamHandlers = {
       const c = model.counts();
       feed({ type: 'meta', text: `connected to <b>${esc(model.cluster)}</b>: ${model.agents.size} agents, ${c.running} running, ${c.suspended} suspended` });
     }
-    refreshChrome();
+    refreshChrome(true);
     if (selected && !model.agents.has(selected)) select(null);
     else if (selected) panel.show(selected);
     const want = initialSelection();
@@ -111,7 +153,7 @@ const streamHandlers = {
     if (!model.applyEvents(events)) return false;
     for (const e of events) eventCounts[e.type] = (eventCounts[e.type] || 0) + 1;
     scene.applyEvents(events);
-    describe(events).forEach(feed);
+    queueFeed(describe(events));
     refreshChrome();
     if (selected) {
       const a = model.agents.get(selected);
@@ -121,7 +163,7 @@ const streamHandlers = {
     return true;
   },
 };
-const stream = synthetic > 0 ? new SyntheticStream(synthetic, streamHandlers, syntheticOptions(new URLSearchParams(window.location.search))) : new Stream(streamURL(), streamHandlers);
+const stream = synthetic > 0 ? new SyntheticStream(synthetic, streamHandlers, syntheticOptions(params)) : new Stream(streamURL(), streamHandlers);
 
 function initialSelection() {
   const m = /[#&]agent=([^&]+)/.exec(window.location.hash);
@@ -155,6 +197,47 @@ $('#group').addEventListener('click', (e) => {
 });
 setGroup(looks0.group, false);
 
+// Layout: two decks or one island (header toggle, ?layout=; remembered).
+// The decks group by atespace, so the grouping toggle hides there.
+function setLayout(id, remember = true) {
+  scene.setLayout(layoutId(id));
+  document.querySelectorAll('#layout button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.layout === scene.layout)));
+  document.body.classList.toggle('layout-decks', scene.layout === 'decks');
+  document.querySelectorAll('#group button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.group === scene.group)));
+  if (remember) rememberLayout(scene.layout);
+}
+$('#layout').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-layout]');
+  if (b) setLayout(b.dataset.layout);
+});
+setLayout(looks0.layout, false);
+
+// Decks: linked or independent moves (chain button, Shift+L), reset (button, r).
+function showDeckLink() {
+  const on = scene.decksLinked;
+  const b = $('#deck-link');
+  b.setAttribute('aria-pressed', String(on));
+  b.classList.toggle('unlinked', !on);
+  b.title = on
+    ? 'Decks linked: dragging a deck moves both (Shift+L to unlink). Drag a deck by its rim or Option/Alt-drag it; hold Shift while dragging to change its height'
+    : 'Decks unlinked: each deck moves on its own (Shift+L to link). Drag a deck by its rim or Option/Alt-drag it; hold Shift while dragging to change its height';
+}
+$('#deck-link').addEventListener('click', () => scene.setDecksLinked(!scene.decksLinked));
+$('#deck-reset').addEventListener('click', () => scene.resetDecks());
+showDeckLink();
+
+// Beams: focus (default) or all (header toggle, ?beams=; remembered).
+function setBeams(mode, remember = true) {
+  scene.setBeamMode(beamModeId(mode));
+  document.querySelectorAll('#beams button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.beams === scene.beamMode)));
+  if (remember) rememberBeams(scene.beamMode);
+}
+$('#beams').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-beams]');
+  if (b) setBeams(b.dataset.beams);
+});
+setBeams(looks0.beams, false);
+
 function select(key, fly = true) {
   selected = key;
   scene.select(key);
@@ -170,14 +253,31 @@ function select(key, fly = true) {
 }
 
 const tip = $('#tooltip');
-function hover(key, x, y) {
-  const a = key && model.agents.get(key);
-  if (!a) {
-    tip.style.display = 'none';
-    document.body.style.cursor = hoverWorker ? 'pointer' : '';
+/** A far tile under the pointer (decks): what flows through it. */
+function hoverTile(tile, info) {
+  if (!tile || !info) {
+    if (!hovered) tip.style.display = 'none';
     return;
   }
-  document.body.style.cursor = 'pointer';
+  const at = scene.hoverAt;
+  if (!at) return;
+  tip.style.display = 'block';
+  tip.style.left = `${at.x + 14}px`;
+  tip.style.top = `${at.y + 14}px`;
+  tip.innerHTML =
+    tile.kind === 'atespace'
+      ? `<div class="t-name">atespace <b>${esc(tile.name)}</b></div><div>${compact(info.total)} agents · ${compact(info.agents)} on workers</div><div class="muted">flowing to ${info.ends} node pool${info.ends === 1 ? '' : 's'}</div>`
+      : `<div class="t-name">node pool <b>${esc(tile.name)}</b></div><div>${compact(info.workers)} workers · ${compact(info.agents)} agents</div><div class="muted">from ${info.ends} atespace${info.ends === 1 ? '' : 's'}</div>`;
+}
+let hovered = null;
+function hover(key, x, y) {
+  const a = key && model.agents.get(key);
+  hovered = a ? key : null;
+  updateCursor();
+  if (!a) {
+    if (!scene.hoverTile) tip.style.display = 'none';
+    return;
+  }
   tip.style.display = 'block';
   tip.style.left = `${x + 14}px`;
   tip.style.top = `${y + 14}px`;
@@ -237,7 +337,7 @@ document.addEventListener('keydown', (e) => {
     scene.pinWorker(null);
     select(null);
   }
-  if (e.key === 'g' && !typing) setGroup(scene.group === 'worker' ? 'atespace' : 'worker');
+  if (e.key === 'g' && !typing && scene.layout !== 'decks') setGroup(scene.group === 'worker' ? 'atespace' : 'worker');
   if (e.key === '/' && !typing) {
     e.preventDefault();
     $('#prefix').focus();
@@ -247,17 +347,42 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'l' && !typing) cycleLabels();
   if (e.key === 'e' && !typing) setFeedCollapsed(!feedCollapsed());
   if (e.key === 'x' && !typing) looks.toggleExtras();
+  // Decks: 1 agent deck only, 2 worker deck only, 3 both.
+  if (DECK_KEYS[e.key] && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) scene.setDeckView(DECK_KEYS[e.key]);
+  // b switches the beams between focus and all.
+  if (e.key === 'b' && !typing && !e.metaKey && !e.ctrlKey && scene.layout === 'decks') setBeams(scene.beamMode === 'focus' ? 'all' : 'focus');
+  // Shift+L links or unlinks the decks; r resets their layout.
+  if (e.key === 'L' && !typing && scene.layout === 'decks') scene.setDecksLinked(!scene.decksLinked);
+  if ((e.key === 'r' || e.key === 'R') && !typing && !e.metaKey && !e.ctrlKey && scene.layout === 'decks') scene.resetDecks();
+  // Arrow keys pan the view (Shift: further).
+  const arrow = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[e.key];
+  if (arrow && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    const step = e.shiftKey ? 180 : 60;
+    scene.panScreen(arrow[0] * step, arrow[1] * step, scene.camera.position.distanceTo(scene.controls.target));
+  }
 });
 $('#home').addEventListener('click', () => scene.fitCamera());
 
 // ------------------------------------------------------------------ chrome
 
-function refreshChrome() {
+// The header (counts per state, totals) refreshes at most four times a
+// second: at 1,000 changes a second, recounting per batch costs frames.
+let chromeTimer = null;
+function refreshChrome(now = false) {
+  if (!now) {
+    chromeTimer ??= setTimeout(() => {
+      chromeTimer = null;
+      refreshChrome(true);
+    }, 250);
+    return;
+  }
   $('#cluster').textContent = model.cluster || '';
   const counts = model.counts();
+  // Counts stay short (12.3k) so the header keeps to one row at 100,000 agents.
   $('#legend').innerHTML = CLASSES.map(
-    (c) => `<button class="chip ${c}${filterState.classes.has(c) ? '' : ' off'}" data-cls="${c}" title="Click to toggle, shift-click to show only this">
-      <span class="sw"></span>${CLASS_LABEL[c]}<b>${counts[c]}</b></button>`,
+    (c) => `<button class="chip ${c}${filterState.classes.has(c) ? '' : ' off'}" data-cls="${c}" title="${CLASS_LABEL[c]}: ${counts[c].toLocaleString('en-US')}. Click to toggle, shift-click to show only this">
+      <span class="sw"></span><span class="lbl">${CLASS_LABEL[c]}</span><span class="ab">${CLASS_ABBR[c]}</span><b>${compact(counts[c])}</b></button>`,
   ).join('');
   $('#total').textContent = `${model.agents.size} agents · ${model.atespaces.size} atespaces · ${model.workers.size} workers`;
   const sel = $('#atespace');
@@ -310,6 +435,37 @@ function feedInset() {
 function updateFeedCounts() {
   $('#feedcount').textContent = feedTotal ? `${feedTotal}` : '';
   $('#feed-unread').textContent = feedUnread ? String(feedUnread > 99 ? '99+' : feedUnread) : '';
+}
+
+// Events reach the feed at most a few times a second. A busy cluster
+// changes hundreds of agents a second; the feed shows the latest few of
+// each batch (crashes first) and a summary line for the rest.
+const FEED_EVERY = 400;
+const FEED_BURST = 8;
+let feedQueue = [];
+let feedTimer = null;
+function queueFeed(items) {
+  feedQueue.push(...items);
+  feedTimer ??= setTimeout(flushFeed, FEED_EVERY);
+}
+
+function flushFeed() {
+  feedTimer = null;
+  const q = feedQueue;
+  feedQueue = [];
+  if (q.length <= FEED_BURST) {
+    q.forEach(feed);
+    return;
+  }
+  const crashed = q.filter((i) => i.type === 'crashed');
+  const keep = [...crashed.slice(-FEED_BURST / 2), ...q.filter((i) => i.type !== 'crashed' && i.type !== 'worker').slice(-FEED_BURST)].slice(-FEED_BURST);
+  const n = {};
+  for (const i of q) n[i.type] = (n[i.type] || 0) + 1;
+  const parts = [['woke', 'woke'], ['suspended', 'suspended'], ['crashed', 'crashed'], ['added', 'added'], ['removed', 'removed'], ['state', 'changed state'], ['worker', 'worker updates']]
+    .filter(([k]) => n[k])
+    .map(([k, label]) => `${n[k]} ${label}`);
+  feed({ type: 'meta', text: `${q.length - keep.length} more events: ${parts.join(', ')}` });
+  keep.forEach(feed);
 }
 
 function feed(item) {
@@ -374,5 +530,69 @@ setInterval(() => {
   $('#clock').textContent = clock();
 }, 1000);
 
+// ?perf=1: the performance overlay (p toggles it); ?bench=1 runs the
+// benchmark once the scene has settled. See docs/design.md, "Scale".
+const perf = new PerfOverlay(
+  document.body,
+  scene,
+  () => ({
+    url: window.location.search || '(none)',
+    agents: model.agents.size,
+    workers: model.workers.size,
+    atespaces: model.atespaces.size,
+    theme: themes.theme?.id || '',
+    shape: scene.shape.id,
+    group: scene.group,
+    layout: scene.layout,
+    ...(scene.layout === 'decks' ? { beams: scene.beamMode } : {}),
+    lod: scene.stats().lod,
+    quality: scene.stats().quality,
+  }),
+  { visible: params.get('perf') === '1' || params.get('bench') === '1' },
+);
+// Scroll: auto (wheel zooms, trackpad scroll pans), zoom (every scroll zooms,
+// Shift+scroll pans; for a Magic Mouse), or pan. ?scroll= overrides; remembered.
+const SCROLL_KEY = 'substrate-scope:scroll';
+function setScroll(mode, remember = true) {
+  const m = scrollModeId(mode);
+  scene.gestures.wheel.mode = m;
+  document.querySelectorAll('#zoomctl [data-scroll]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.scroll === m)));
+  if (remember) localStorage.setItem(SCROLL_KEY, m);
+}
+setScroll(new URLSearchParams(location.search).get('scroll') || localStorage.getItem(SCROLL_KEY) || 'auto', false);
+document.querySelectorAll('#zoomctl [data-scroll]').forEach((b) => b.addEventListener('click', () => setScroll(b.dataset.scroll)));
+$('#zoom-in').addEventListener('click', () => scene.zoomBy(1 / 1.25));
+$('#zoom-out').addEventListener('click', () => scene.zoomBy(1.25));
+document.addEventListener('keydown', (e) => {
+  const typing = document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'SELECT';
+  if (typing || e.metaKey || e.ctrlKey) return;
+  if (e.key === '+' || e.key === '=') scene.zoomBy(1 / 1.25);
+  if (e.key === '-' || e.key === '_') scene.zoomBy(1.25);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'p' && document.activeElement?.tagName !== 'INPUT') perf.el.hidden = !perf.el.hidden;
+});
+if (params.get('bench') === '1') {
+  const start = () => (model.seq > 0 && scene.island ? setTimeout(() => perf.runBench(), 3000) : setTimeout(start, 500));
+  start();
+}
+
+// The controls tour: every way to move around, performed on the live scene
+// with captions (the ? button or key; ?demo=controls loops it, &loop=0 runs
+// it once). It puts the user's camera, decks, beams and layout back after.
+const tour = new ControlsTour(scene, {
+  ready: () => model.seq > 0 && !!scene.island,
+  selected: () => selected,
+  scrollMode: () => scene.gestures.wheel.mode,
+  select,
+  setLayout,
+  setGroup,
+  setBeams,
+  setScroll,
+});
+$('#tour-btn').addEventListener('click', () => tour.toggle({ loop: params.get('loop') === '1' }));
+if (params.get('demo') === 'controls') tour.startWhenReady({ loop: params.get('loop') !== '0' });
+
 // For debugging and screenshots.
-window.scope = { model, scene, panel, select, stateClass, eventCounts, themes, looks, stream };
+window.scope = { model, scene, panel, select, stateClass, eventCounts, themes, looks, stream, perf, tour };

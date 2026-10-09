@@ -203,8 +203,73 @@ body {
   display: flex;
   gap: 6px;
   flex: 1;
-  justify-content: center;
-  flex-wrap: wrap;
+  justify-content: safe center;
+  /* One row, always: chips shorten (12.3k, then abbreviations) instead of wrapping. */
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chip .ab {
+  display: none;
+}
+
+.chip {
+  white-space: nowrap;
+  flex: none;
+}
+
+/* Decks group by atespace: the grouping toggle only applies to the single island. */
+body.layout-decks #group {
+  display: none;
+}
+
+/* Deck controls (link, reset, beams) only apply to the two decks. */
+body:not(.layout-decks) .decks-only {
+  display: none;
+}
+
+#deckctl button {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 7px;
+}
+
+#deckctl button:first-of-type {
+  border-left: none;
+}
+
+#deckctl svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The chain: whole when linked, broken apart when not. */
+.deck-link .ch-x {
+  display: none;
+}
+
+.deck-link.unlinked .ch-a {
+  transform: translate(1.5px, -1.5px);
+}
+
+.deck-link.unlinked .ch-b {
+  transform: translate(-1.5px, 1.5px);
+}
+
+.deck-link.unlinked .ch-x {
+  display: inline;
+}
+
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
 }
 
 .chip {
@@ -787,6 +852,33 @@ body.feed-collapsed .feed-tab {
 }
 
 /* --------------------------------------------------------------- labels */
+
+/* Deck names beside each deck (decks layout). */
+.deck-label {
+  pointer-events: none;
+  padding: 4px 10px 5px;
+  border-left: 2px solid var(--accent);
+  text-shadow: var(--label-shadow);
+}
+
+.deck-label .name {
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.deck-label .meta {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* The worker deck's labels sit under the glass: a little quieter. */
+.district-label.lower {
+  opacity: 0.88;
+}
 
 .district-label {
   pointer-events: none;
@@ -1520,8 +1612,458 @@ table.conds .msg {
   }
 }
 
+/* Narrow headers: state names shorten so the chips stay on one row. */
+@media (max-width: 1700px) {
+  .legend .chip .lbl {
+    display: none;
+  }
+
+  .legend .chip .ab {
+    display: inline;
+  }
+}
+
 @media (max-width: 1100px) {
   .legend {
     display: none;
+  }
+}
+
+/* "focus | all" needs its word to make sense; below 1500px the toggle
+   gives its room to the state chips (b still switches, and ?beams=). */
+#beams .seg-k {
+  display: inline;
+  padding: 0 4px 0 8px;
+}
+
+#beams .seg-k + button {
+  border-left: 1px solid var(--line);
+}
+
+@media (max-width: 1499px) {
+  #beams {
+    display: none !important;
+  }
+}
+
+/* ?perf=1 overlay (p toggles it). */
+#perf {
+  position: fixed;
+  right: 12px;
+  top: 76px;
+  z-index: 30;
+  min-width: 230px;
+  max-width: 560px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--glass-strong);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font: 11px/1.35 var(--mono);
+  pointer-events: auto;
+}
+
+#perf .perf-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+#perf .bench,
+#perf .copy {
+  font: inherit;
+  color: var(--text);
+  background: var(--chip-bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+#perf .perf-body {
+  margin: 0;
+  white-space: pre;
+}
+
+#perf .perf-result {
+  width: 540px;
+  max-width: 70vw;
+  margin-top: 6px;
+  font: inherit;
+  color: var(--text);
+  background: var(--chip-bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  white-space: pre;
+}
+
+.district-label.pool .name {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* Zoom buttons and scroll mode, bottom right above the status bar. */
+#zoomctl {
+  position: fixed;
+  right: 12px;
+  bottom: 36px;
+  z-index: 25;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  pointer-events: auto;
+}
+#zoomctl > button {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: var(--glass-strong);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font: 600 18px/1 var(--mono);
+  cursor: pointer;
+}
+#zoomctl > button:hover {
+  border-color: var(--accent);
+}
+#zoomctl .scrollmode {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--glass-strong);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font: 11px/1 var(--mono);
+}
+#zoomctl .scrollmode span {
+  padding: 0 4px;
+}
+#zoomctl .scrollmode button {
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+#zoomctl .scrollmode button[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+/* The controls tour (tour-ui.js): caption card, ghost cursor, key caps. */
+#zoomctl > #tour-btn {
+  font: 700 16px/1 var(--font);
+  color: var(--accent);
+}
+body.touring #zoomctl > #tour-btn {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+.tour {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+}
+.tour[hidden] {
+  display: none;
+}
+.tour-card {
+  position: absolute;
+  left: 58px;
+  top: 78px;
+  width: min(430px, 34vw);
+  padding: 14px 18px 10px;
+  border-radius: 14px;
+  background: var(--glass-strong);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  pointer-events: auto;
+  backdrop-filter: blur(8px);
+}
+.tour-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.tour-n {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font: 700 13px/1.4 var(--mono);
+}
+.tour-title {
+  margin: 0;
+  font: 700 23px/1.2 var(--font);
+  letter-spacing: -0.01em;
+}
+.tour-now {
+  min-height: 1.5em;
+  margin: 6px 0 8px;
+  font-size: 16px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.tour-now-k {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  font: 600 11px/1.6 var(--mono);
+  text-transform: uppercase;
+  vertical-align: 2px;
+}
+.tour-how {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 3px 12px;
+  margin: 0;
+  font-size: 14px;
+}
+.tour-how dt {
+  color: var(--muted);
+}
+.tour-how dd {
+  margin: 0;
+  color: var(--text-2);
+}
+.tour-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.tour-keys[hidden],
+.tour-note[hidden] {
+  display: none;
+}
+.tour-keys kbd {
+  min-width: 30px;
+  padding: 5px 9px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  border-bottom-width: 3px;
+  background: var(--chip-bg);
+  color: var(--text);
+  font: 600 14px/1 var(--mono);
+  text-align: center;
+  transition: background 0.08s, color 0.08s, transform 0.08s;
+}
+.tour-keys kbd.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  transform: translateY(2px);
+}
+.tour-note {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.tour-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+}
+.tour-bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--chip-bg);
+  overflow: hidden;
+}
+.tour-bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+}
+.tour-foot button {
+  width: 30px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid var(--btn-border);
+  background: var(--btn-bg);
+  color: var(--btn-text);
+  font: 600 13px/1 var(--font);
+  cursor: pointer;
+}
+.tour-foot button:hover {
+  background: var(--btn-hover);
+}
+.tour-hint {
+  margin-top: 4px;
+  font: 11px/1.4 var(--mono);
+  color: var(--muted);
+  text-align: right;
+}
+.tour.paused .tour-n::after {
+  content: " paused";
+}
+.tour-cursor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  will-change: transform;
+}
+.tour-cursor svg {
+  position: absolute;
+  left: -4px;
+  top: -3px;
+  fill: var(--text);
+  stroke: var(--bg);
+  stroke-width: 1.6;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.5));
+}
+.tour-ring {
+  position: absolute;
+  left: -16px;
+  top: -16px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 3px solid var(--accent);
+  opacity: 0;
+  transform: scale(0.6);
+  transition: opacity 0.12s, transform 0.12s;
+}
+.tour-cursor.down .tour-ring {
+  opacity: 0.95;
+  transform: scale(1);
+}
+.tour-cursor.right .tour-ring {
+  border-style: dashed;
+}
+.tour-tag {
+  position: absolute;
+  left: 26px;
+  top: 22px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font: 700 12px/1.4 var(--mono);
+  white-space: nowrap;
+}
+.tour-tag:empty {
+  display: none;
+}
+.tour-trail {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.tour-trail polyline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 2 7;
+  opacity: 0.9;
+  transition: opacity 0.6s;
+}
+.tour-trail.fade polyline {
+  opacity: 0;
+}
+.tour-glyph {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+.tour-glyph[hidden],
+.tour-spot[hidden] {
+  display: none;
+}
+.tour-glyph svg {
+  fill: var(--glass-strong);
+  stroke: var(--accent);
+  stroke-width: 2.5;
+}
+.tour-glyph .g-move,
+.tour-glyph .g-pinch-a,
+.tour-glyph .g-pinch-b {
+  fill: var(--accent);
+  stroke: none;
+}
+.tour-glyph .g-move {
+  animation: tour-scroll 0.6s ease-in-out infinite alternate;
+}
+.tour-glyph .g-pinch-a {
+  animation: tour-pinch-a 0.8s ease-in-out infinite alternate;
+}
+.tour-glyph .g-pinch-b {
+  animation: tour-pinch-b 0.8s ease-in-out infinite alternate;
+}
+@keyframes tour-scroll {
+  from {
+    transform: translateY(-4px);
+  }
+  to {
+    transform: translateY(5px);
+  }
+}
+@keyframes tour-pinch-a {
+  to {
+    transform: translate(-7px, -7px);
+  }
+}
+@keyframes tour-pinch-b {
+  to {
+    transform: translate(7px, 7px);
+  }
+}
+.tour-spot {
+  position: absolute;
+  border-radius: 10px;
+  border: 3px solid var(--accent);
+  box-shadow: 0 0 0 4px var(--chip-hover);
+  animation: tour-spot 1s ease-in-out infinite alternate;
+}
+@keyframes tour-spot {
+  to {
+    box-shadow: 0 0 0 9px var(--chip-hover);
+  }
+}
+.tour-pressed {
+  outline: 3px solid var(--accent) !important;
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tour-glyph *,
+  .tour-spot {
+    animation: none !important;
+  }
+  .tour-keys kbd,
+  .tour-ring,
+  .tour-trail polyline {
+    transition: none;
+  }
+}
+@media (max-width: 900px) {
+  .tour-card {
+    top: auto;
+    bottom: 34px;
+    width: calc(100vw - 70px);
+    left: 8px;
+  }
+  .tour-title {
+    font-size: 19px;
   }
 }

@@ -238,6 +238,38 @@ export class Effects {
     });
   }
 
+  /**
+   * Builds one of every effect so a renderer.compile() can compile their
+   * shaders up front, and keeps their materials: three.js releases a shader
+   * program when the last material using it is disposed, so without a
+   * keeper every effect kind would recompile whenever none of it is
+   * playing (a long frame in the middle of a session, not only on first
+   * use). Returns the cleanup that takes the meshes away again.
+   */
+  warmup() {
+    const n = this.items.length;
+    const a = new THREE.Vector3(0, -50, 0);
+    const b = new THREE.Vector3(1, -50, 1);
+    this.ripple(0, 0, 0xffffff);
+    this.shock(0, 0, 0xffffff);
+    this.beam(0, 0, 0xffffff);
+    this.arc(a, b, 0xffffff);
+    this.comet(a, b, 0xffffff);
+    const added = this.items.splice(n);
+    // A comet draws nothing until its first update.
+    for (const it of added) it.update(0.2);
+    return () => {
+      const before = this.keepers || [];
+      this.keepers = added.map((it) => it.obj.material);
+      for (const it of added) {
+        this.parent.remove(it.obj);
+        if (it.obj.geometry !== ringGeo && it.obj.geometry !== beamGeo) it.obj.geometry?.dispose();
+      }
+      // The previous keepers go only now that the new ones hold the programs.
+      for (const m of before) m.dispose();
+    };
+  }
+
   update(t) {
     this.items = this.items.filter((it) => {
       if (it.update(t - it.t0)) return true;

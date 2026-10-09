@@ -152,37 +152,90 @@ export function slotPosition(district, slot) {
 }
 
 /**
- * Keeps agents in stable slots. Assign returns false when the district is
- * full, which means the island must be re-planned.
+ * Keeps agents in stable slots. Assign returns -1 when the district is
+ * full, which means the island must be re-planned. Freed slots are reused
+ * lowest first (a min-heap, so churn costs O(log n) per agent), and keyAt
+ * maps a slot back to its agent (picking by grid cell).
  */
 export class SlotTable {
   constructor(capacity) {
     this.capacity = capacity;
     this.byKey = new Map();
+    /** @type {(string|undefined)[]} */
+    this.keys = [];
     this.free = [];
     this.next = 0;
   }
   get size() {
     return this.byKey.size;
   }
+  /** The agent in a slot, or undefined. */
+  keyAt(slot) {
+    return this.keys[slot];
+  }
   assign(key) {
     if (this.byKey.has(key)) return this.byKey.get(key);
     let slot;
     if (this.free.length) {
-      this.free.sort((a, b) => a - b);
-      slot = this.free.shift();
+      slot = heapPop(this.free);
     } else if (this.next < this.capacity) {
       slot = this.next++;
     } else {
       return -1;
     }
     this.byKey.set(key, slot);
+    this.keys[slot] = key;
     return slot;
   }
   release(key) {
     const slot = this.byKey.get(key);
     if (slot === undefined) return;
     this.byKey.delete(key);
-    this.free.push(slot);
+    this.keys[slot] = undefined;
+    heapPush(this.free, slot);
   }
+}
+
+function heapPush(h, v) {
+  h.push(v);
+  let i = h.length - 1;
+  while (i > 0) {
+    const p = (i - 1) >> 1;
+    if (h[p] <= v) break;
+    h[i] = h[p];
+    i = p;
+  }
+  h[i] = v;
+}
+
+function heapPop(h) {
+  const top = h[0];
+  const last = h.pop();
+  if (h.length) {
+    let i = 0;
+    const n = h.length;
+    for (;;) {
+      const l = 2 * i + 1;
+      if (l >= n) break;
+      const c = l + 1 < n && h[l + 1] < h[l] ? l + 1 : l;
+      if (h[c] >= last) break;
+      h[i] = h[c];
+      i = c;
+    }
+    h[i] = last;
+  }
+  return top;
+}
+
+/** The slot of the cell at world (x, z) in a district (inverse of slotPosition), or -1. */
+export function slotAt(district, x, z) {
+  const strip = district.strip ?? LABEL_STRIP;
+  const gridW = district.cols * CELL;
+  const gridD = district.rows * CELL;
+  const x0 = district.x + (district.w - gridW) / 2;
+  const z0 = district.z + strip + (district.d - strip - gridD) / 2;
+  const col = Math.floor((x - x0) / CELL);
+  const row = Math.floor((z - z0) / CELL);
+  if (col < 0 || row < 0 || col >= district.cols || row >= district.rows) return -1;
+  return row * district.cols + col;
 }
