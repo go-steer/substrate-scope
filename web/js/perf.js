@@ -133,6 +133,11 @@ export class PerfOverlay {
     const b = { t: 0, phase: 'far', last: 0, promise };
     this.bench = b;
     this.result.hidden = true;
+    // The decks run in their planned arrangement, so runs compare whatever
+    // the user dragged them to; their layout comes back afterwards.
+    const decks = sc.offsets && sc.copyDeckOffsets ? sc.copyDeckOffsets() : null;
+    if (decks) sc.setDeckOffsets({ ...decks, agents: { x: 0, y: 0, z: 0 }, workers: { x: 0, y: 0, z: 0 } });
+    this.benchDecks = decks ? (decks.agents.x || decks.agents.y || decks.agents.z || decks.workers.x || decks.workers.y || decks.workers.z ? 'reset to the plan for the run (restored after)' : 'as planned') : null;
     const island = { ...sc.island };
     // Quality stays where it is during the run ('auto' would otherwise
     // re-size render targets mid-run, a long frame that isn't the scene's).
@@ -153,6 +158,7 @@ export class PerfOverlay {
       if (b.t >= BENCH_SECONDS) {
         sc.setCameraDriver(null);
         if (sc.quality) sc.quality.held = false;
+        if (decks) sc.setDeckOffsets(decks);
         this.bench = null;
         const text = formatSummary(this.benchInfo(), summarize(samples));
         this.showResult(text);
@@ -171,6 +177,7 @@ export class PerfOverlay {
       browser: navigator.userAgent,
       canvas: `${c.width}x${c.height} (dpr ${r.getPixelRatio().toFixed(2)})`,
       ...this.info(),
+      ...(this.benchDecks ? { decks: this.benchDecks } : {}),
     };
   }
 

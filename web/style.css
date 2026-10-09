@@ -224,6 +224,54 @@ body.layout-decks #group {
   display: none;
 }
 
+/* Deck controls (link, reset, beams) only apply to the two decks. */
+body:not(.layout-decks) .decks-only {
+  display: none;
+}
+
+#deckctl button {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 7px;
+}
+
+#deckctl button:first-of-type {
+  border-left: none;
+}
+
+#deckctl svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The chain: whole when linked, broken apart when not. */
+.deck-link .ch-x {
+  display: none;
+}
+
+.deck-link.unlinked .ch-a {
+  transform: translate(1.5px, -1.5px);
+}
+
+.deck-link.unlinked .ch-b {
+  transform: translate(-1.5px, 1.5px);
+}
+
+.deck-link.unlinked .ch-x {
+  display: inline;
+}
+
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
 .chip {
   display: inline-flex;
   align-items: center;
@@ -1578,6 +1626,23 @@ table.conds .msg {
 @media (max-width: 1100px) {
   .legend {
     display: none;
+  }
+}
+
+/* "focus | all" needs its word to make sense; below 1500px the toggle
+   gives its room to the state chips (b still switches, and ?beams=). */
+#beams .seg-k {
+  display: inline;
+  padding: 0 4px 0 8px;
+}
+
+#beams .seg-k + button {
+  border-left: 1px solid var(--line);
+}
+
+@media (max-width: 1499px) {
+  #beams {
+    display: none !important;
   }
 }
 

@@ -15,7 +15,13 @@
 // The two decks' connections. Beams: a thin line of light from each agent
 // that holds a worker down to its worker's pad, in the agent's state color,
 // with a soft pulse flowing down it; a beam drops when its agent wakes and
-// retracts when it suspends. Ribbons: zoomed out, a flat band from each
+// retracts when it suspends. Beams can bundle: each is a cubic whose inner
+// control points are pulled toward points its atespace -> node pool pair
+// shares, so a pair's beams run as one cable and fan out at the ends
+// (decks.js bundleControls is the same math). The agent ends are in the
+// scene's frame (the agent deck's); the worker ends in the worker deck's,
+// placed by a uniform, so moving a deck moves every beam and ribbon without
+// rewriting them. Ribbons: zoomed out, a flat band from each
 // atespace tile down to each node-pool tile, as wide and bright as the
 // number of running agents on that pair. Both are one instanced draw each,
 // computed on the GPU from per-instance endpoints, and both fade per pixel
@@ -140,9 +146,12 @@ const beamVertex = /* glsl */ `
 attribute vec3 aFrom;
 attribute vec3 aTo;
 attribute vec4 aMeta; // class, worker index, seed, agent index
-attribute vec2 aAnim; // start time, direction (1 drop, -1 retract, 0 none)
+attribute vec3 aAnim; // start time, direction (1 drop, -1 retract, 0 none), fade-out start (0 none)
+attribute vec4 aBundle; // district center x, z (scene); pool center x, z (worker deck)
 uniform float uTime;
+uniform float uSegments;
 uniform float uDrop;
+uniform float uFadeDur;
 uniform vec3 uColors[5];
 uniform float uAlpha;
 uniform float uHiAlpha;
@@ -156,6 +165,8 @@ uniform float uFarHi;
 uniform float uFade;
 uniform vec2 uViewport;
 uniform float uWidth;
+uniform vec3 uToOff;
+uniform float uBundle;
 varying float vT;
 varying float vE;
 varying float vA;
@@ -165,6 +176,14 @@ varying float vLen;
 varying float vAnim;
 varying float vSide;
 varying vec3 vCol;
+vec3 A;
+vec3 C1;
+vec3 C2;
+vec3 P;
+vec3 curve(float t) {
+  float u = 1.0 - t;
+  return u * u * u * A + 3.0 * u * u * t * C1 + 3.0 * u * t * t * C2 + t * t * t * P;
+}
 void main() {
   float e = 1.0;
   if (aAnim.y > 0.5) e = clamp((uTime - aAnim.x) / uDrop, 0.0, 1.0);
@@ -183,6 +202,8 @@ void main() {
   else if (hi > 0.5) a = mix(uAlpha, uHiAlpha, 0.45);
   else if (hi < -0.5) a = uAlpha * 0.12;
   else a = uAlpha * (uFocusW >= 0.0 ? 0.7 : 1.0);
+  // A recent change's beam fades out after a while (focus mode).
+  if (aAnim.z > 0.0) a *= 1.0 - smoothstep(aAnim.z, aAnim.z + uFadeDur, uTime);
   // Beams give way to ribbons where their agent's cell gets too small on
   // screen (lit beams stay).
   vec4 mvA = viewMatrix * vec4(aFrom, 1.0);
@@ -190,31 +211,44 @@ void main() {
   float far = 1.0 - smoothstep(uFarLo, uFarHi * 1.4, px);
   if (hi < 1.5) a *= 1.0 - far;
   vA = a * uFade;
+  // The curve: straight when uBundle is 0, else pulled toward the pair's
+  // shared points a third and two thirds of the way down.
+  A = aFrom;
+  P = aTo + uToOff;
+  float dy = P.y - A.y;
+  vec3 s1 = vec3(mix(A.x, P.x, 1.0 / 3.0), A.y + dy / 3.0, mix(A.z, P.z, 1.0 / 3.0));
+  vec3 s2 = vec3(mix(A.x, P.x, 2.0 / 3.0), A.y + dy * 2.0 / 3.0, mix(A.z, P.z, 2.0 / 3.0));
+  C1 = vec3(mix(s1.x, aBundle.x, uBundle), s1.y, mix(s1.z, aBundle.y, uBundle));
+  C2 = vec3(mix(s2.x, aBundle.z + uToOff.x, uBundle), s2.y, mix(s2.z, aBundle.w + uToOff.z, uBundle));
   vT = t;
   vE = e;
   vHi = hi;
   vSeed = aMeta.z;
-  vLen = distance(aFrom, aTo);
+  vLen = distance(A, P) * (1.0 + 0.3 * uBundle);
   vAnim = abs(aAnim.y) > 0.5 && e < 1.0 && e > 0.0 ? 1.0 : 0.0;
   vCol = uColors[int(aMeta.x + 0.5)];
   vSide = position.y;
-  // A quad a few pixels wide along the projected segment (WebGL lines are
-  // one pixel): both ends in view space, clipped to the near plane.
-  vec4 va = mvA;
-  vec4 vb = viewMatrix * vec4(mix(aFrom, aTo, e), 1.0);
   const float zn = -0.15;
-  if ((va.z > zn && vb.z > zn) || vA < 0.004) {
+  if (vA < 0.004 || mvA.z > zn) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     return;
   }
-  if (va.z > zn) va = mix(va, vb, (va.z - zn) / (va.z - vb.z));
-  if (vb.z > zn) vb = mix(vb, va, (vb.z - zn) / (vb.z - va.z));
+  // A strip a few pixels wide along the projected curve (WebGL lines are
+  // one pixel): this vertex's point, and the direction on screen from
+  // its neighbors on the curve.
+  float h = 0.5 / max(1.0, uSegments);
+  vec4 vc = viewMatrix * vec4(curve(t), 1.0);
+  vec4 va = viewMatrix * vec4(curve(max(t - h * e, 0.0)), 1.0);
+  vec4 vb = viewMatrix * vec4(curve(min(t + h * e, e)), 1.0);
+  vc.z = min(vc.z, zn);
+  va.z = min(va.z, zn);
+  vb.z = min(vb.z, zn);
+  vec4 c = projectionMatrix * vc;
   vec4 ca = projectionMatrix * va;
   vec4 cb = projectionMatrix * vb;
   vec2 d = (cb.xy / cb.w - ca.xy / ca.w) * uViewport;
   float dl = length(d);
   d = dl > 1e-4 ? d / dl : vec2(1.0, 0.0);
-  vec4 c = position.x < 0.5 ? ca : cb;
   float w = uWidth * (hi > 2.5 ? 2.4 : hi > 1.5 ? 1.8 : hi > 0.5 ? 1.35 : hi < -0.5 ? 0.8 : 1.0);
   c.xy += vec2(-d.y, d.x) * position.y * w / uViewport * c.w;
   gl_Position = c;
@@ -249,7 +283,30 @@ void main() {
   gl_FragColor = vec4(col, min(a, 1.0));
 }`;
 
-/** Beams keyed by agent: one instanced draw of screen-space quads. */
+/**
+ * A beam's strip: segments quads along t (0..1), two vertices (side -1, 1)
+ * at each step. One segment is a straight beam (four vertices); bundled
+ * beams curve, so they need more.
+ */
+export function beamGeometry(segments) {
+  const n = Math.max(1, Math.round(segments));
+  const pos = new Float32Array((n + 1) * 2 * 3);
+  for (let i = 0; i <= n; i++) pos.set([i / n, -1, 0, i / n, 1, 0], i * 6);
+  const index = [];
+  for (let i = 0; i < n; i++) {
+    const a = i * 2;
+    index.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
+  }
+  const g = new THREE.InstancedBufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setIndex(index);
+  return g;
+}
+
+/** Segments of a bundled (curved) beam. */
+export const BEAM_SEGMENTS = 14;
+
+/** Beams keyed by agent: one instanced draw of screen-space strips. */
 export class BeamSet {
   /**
    * @param {THREE.Object3D} parent
@@ -278,6 +335,10 @@ export class BeamSet {
       uFade: fade || { value: 1 },
       uViewport: { value: new THREE.Vector2(1280, 720) },
       uWidth: { value: 2 },
+      uFadeDur: { value: 1.2 },
+      uToOff: { value: new THREE.Vector3() },
+      uBundle: { value: 0 },
+      uSegments: { value: 1 },
     };
     this.material = new THREE.ShaderMaterial({
       vertexShader: beamVertex,
@@ -286,17 +347,45 @@ export class BeamSet {
       depthWrite: false,
       uniforms: this.uniforms,
     });
-    // One quad per beam: (t, side) corners.
-    const g = new THREE.InstancedBufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0, -1, 0, 0, 1, 0, 1, -1, 0, 1, 1, 0]), 3));
-    g.setIndex([0, 2, 1, 1, 2, 3]);
-    this.lines = new THREE.Mesh(g, this.material);
+    // One straight quad per beam until bundling asks for curves.
+    this.lines = new THREE.Mesh(beamGeometry(1), this.material);
     this.lines.frustumCulled = false;
     this.lines.renderOrder = 4;
     parent.add(this.lines);
-    this.set_ = new Keyed(this.lines, { aFrom: 3, aTo: 3, aMeta: 4, aAnim: 2 });
+    this.set_ = new Keyed(this.lines, { aFrom: 3, aTo: 3, aMeta: 4, aAnim: 3, aBundle: 4 });
     /** key -> time the retracting beam goes away */
     this.retracting = new Map();
+    /** key -> time the fading beam goes away */
+    this.fading = new Map();
+  }
+
+  /**
+   * How strongly beams bundle (0: straight, as in 'all' mode) and how many
+   * segments each beam's strip has (curves need several; straight beams one).
+   */
+  setBundle(beta, segments = beta > 0 ? BEAM_SEGMENTS : 1) {
+    this.uniforms.uBundle.value = beta;
+    const n = Math.max(1, Math.round(segments));
+    if (n === this.uniforms.uSegments.value) return;
+    this.uniforms.uSegments.value = n;
+    // Swap the strip, keeping the instance attributes.
+    const g = this.lines.geometry;
+    const fresh = beamGeometry(n);
+    for (const name of Object.keys(this.set_.sizes)) fresh.setAttribute(name, g.getAttribute(name));
+    fresh.instanceCount = g.instanceCount;
+    this.lines.geometry = fresh;
+    g.dispose();
+    this.set_.ranges.markAll();
+  }
+
+  /** Where the worker deck is (the pad ends are in its coordinates). */
+  setWorkerOffset(x, y, z) {
+    this.uniforms.uToOff.value.set(x, y, z);
+  }
+
+  /** Makes room for n beams up front (no growth, and no re-upload, while they fill). */
+  reserve(n) {
+    if (n > this.set_.capacity) this.set_.allocate(n);
   }
 
   get count() {
@@ -321,17 +410,31 @@ export class BeamSet {
    * @param {number} seed 0..1
    * @param {number} idx the agent's point index (selection test)
    * @param {number} [drop] start time of a drop animation (undefined: none)
+   * @param {{dx: number, dz: number, qx: number, qz: number}} [bundle] the pair's shared points: district center (scene), pool center (worker deck)
    */
-  set(key, from, to, cls, worker, seed, idx, drop) {
+  set(key, from, to, cls, worker, seed, idx, drop, bundle) {
     const s = this.set_;
     const fresh = !s.has(key);
     const i = s.slot(key);
     s.write(i, 'aFrom', [from.x, from.y, from.z]);
     s.write(i, 'aTo', [to.x, to.y, to.z]);
     s.write(i, 'aMeta', [cls, worker, seed, idx]);
-    if (drop !== undefined) s.write(i, 'aAnim', [drop, 1]);
-    else if (fresh || this.retracting.has(key)) s.write(i, 'aAnim', [0, 0]);
+    if (bundle) s.write(i, 'aBundle', [bundle.dx, bundle.dz, bundle.qx, bundle.qz]);
+    else if (fresh) s.write(i, 'aBundle', [from.x, from.z, to.x, to.z]);
+    if (drop !== undefined) s.write(i, 'aAnim', [drop, 1, 0]);
+    else if (fresh || this.retracting.has(key) || this.fading.has(key)) s.write(i, 'aAnim', [0, 0, 0]);
     this.retracting.delete(key);
+    this.fading.delete(key);
+  }
+
+  /** Fades a beam out from time t (over the uFadeDur seconds); it goes away then. */
+  fadeOut(key, t) {
+    const i = this.set_.slots.get(key);
+    if (i === undefined) return false;
+    this.set_.attrs.aAnim.array[i * 3 + 2] = t;
+    this.set_.mark(i);
+    this.fading.set(key, t + this.uniforms.uFadeDur.value);
+    return true;
   }
 
   /** A beam's class changed (its color). */
@@ -353,27 +456,40 @@ export class BeamSet {
   retract(key, t, dur) {
     const i = this.set_.slots.get(key);
     if (i === undefined) return false;
-    this.set_.write(i, 'aAnim', [t, -1]);
+    this.set_.write(i, 'aAnim', [t, -1, 0]);
+    this.fading.delete(key);
     this.retracting.set(key, t + dur);
     return true;
   }
 
-  /** Drops the beams whose retraction ended by time t. */
+  /** Whether a beam is on its way out (retracting or fading). */
+  leaving(key) {
+    return this.retracting.has(key) || this.fading.has(key);
+  }
+
+  /** Drops the beams whose retraction or fade ended by time t; returns how many. */
   expire(t) {
-    for (const [key, until] of this.retracting) {
-      if (until > t) continue;
-      this.retracting.delete(key);
-      this.set_.remove(key);
+    let n = 0;
+    for (const m of [this.retracting, this.fading]) {
+      for (const [key, until] of m) {
+        if (until > t) continue;
+        m.delete(key);
+        this.set_.remove(key);
+        n++;
+      }
     }
+    return n;
   }
 
   remove(key) {
     this.retracting.delete(key);
+    this.fading.delete(key);
     return this.set_.remove(key);
   }
 
   clear() {
     this.retracting.clear();
+    this.fading.clear();
     this.set_.clear();
   }
 
@@ -416,6 +532,7 @@ export class BeamSet {
     this.lines.geometry.dispose();
     this.material.dispose();
     this.retracting.clear();
+    this.fading.clear();
   }
 }
 
@@ -423,6 +540,7 @@ const ribbonVertex = /* glsl */ `
 attribute vec3 aFrom;
 attribute vec3 aTo;
 attribute vec4 aInfo; // width, strength (0..1), level, seed
+uniform vec3 uToOff;
 uniform float uScale;
 uniform float uFarLo;
 uniform float uFarHi;
@@ -440,7 +558,7 @@ void main() {
   // pool: x and z follow smoothstep(t), y follows t (tangent in closed form).
   float s = t * t * (3.0 - 2.0 * t);
   float ds = 6.0 * t * (1.0 - t);
-  vec3 dv = aTo - aFrom;
+  vec3 dv = aTo + uToOff - aFrom;
   vec3 p = vec3(aFrom.x + dv.x * s, aFrom.y + dv.y * t, aFrom.z + dv.z * s);
   vec3 tangent = vec3(dv.x * ds, dv.y, dv.z * ds);
   vec3 across = cross(tangent, cameraPosition - p);
@@ -531,6 +649,7 @@ export class RibbonSet {
       uFarLo: look.uFarLo || { value: 2.5 },
       uFarHi: look.uFarHi || { value: 5 },
       uFade: fade || { value: 1 },
+      uToOff: { value: new THREE.Vector3() },
     };
     this.material = new THREE.ShaderMaterial({
       vertexShader: ribbonVertex,
@@ -603,7 +722,12 @@ export class RibbonSet {
     }
   }
 
-  /** Minimum visibility (beams trimmed by the budget: ribbons carry the rest). */
+  /** Where the worker deck is (the pool ends are in its coordinates). */
+  setWorkerOffset(x, y, z) {
+    this.uniforms.uToOff.value.set(x, y, z);
+  }
+
+  /** Minimum visibility (beams trimmed by the budget, or focus mode: ribbons carry the rest). */
   setMin(v) {
     this.uniforms.uMin.value = v;
   }

@@ -23,8 +23,8 @@ import { esc, duration, since, clock, workerLabel, compact } from './format.js';
 import { describe } from './feed.js';
 import { SyntheticStream, syntheticDetail, syntheticOptions } from './synth.js';
 import { ThemePicker } from './theming.js';
-import { LookPicker, initialLooks, rememberGroup, rememberLayout } from './looks.js';
-import { DECK_KEYS, layoutId } from './decks.js';
+import { LookPicker, initialLooks, rememberGroup, rememberLayout, rememberBeams, storedDecks, storeDecks } from './looks.js';
+import { DECK_KEYS, layoutId, beamModeId } from './decks.js';
 import { inkOn } from './themes.js';
 import { PerfOverlay } from './perf.js';
 
@@ -47,13 +47,48 @@ const scene = new Scene(
     onHover: (key, x, y) => hover(key, x, y),
     onHoverWorker: (name) => {
       hoverWorker = name;
-      document.body.style.cursor = name ? 'pointer' : '';
+      updateCursor();
     },
     onHoverTile: (tile, info) => hoverTile(tile, info),
+    onDeckHandle: (h) => {
+      deckHandle = h;
+      updateCursor();
+    },
+    onDrag: (kind) => {
+      dragKind = kind;
+      updateCursor();
+    },
+    onDecksChanged: (o) => {
+      storeDecks(o);
+      showDeckLink();
+    },
   },
-  { shape: looks0.agents, router: looks0.router, extras: looks0.extras, group: looks0.group, layout: looks0.layout, budget: Number(params.get('budget')) || undefined, quality: params.get('quality') || 'auto' },
+  {
+    shape: looks0.agents,
+    router: looks0.router,
+    extras: looks0.extras,
+    group: looks0.group,
+    layout: looks0.layout,
+    beams: looks0.beams,
+    budget: Number(params.get('budget')) || undefined,
+    quality: params.get('quality') || 'auto',
+  },
 );
 let hoverWorker = null;
+let deckHandle = null;
+let dragKind = null;
+// Deck offsets and the link state from the last visit.
+scene.setDeckOffsets(storedDecks());
+
+/** The pointer: grabbing while dragging, move over a deck's rim, pointer over an agent or worker. */
+function updateCursor() {
+  let c = '';
+  if (dragKind === 'deck') c = 'grabbing';
+  else if (dragKind === 'pan') c = 'move';
+  else if (deckHandle) c = 'move';
+  else if (hovered || hoverWorker) c = 'pointer';
+  document.body.style.cursor = c;
+}
 // ?synthetic=N replaces the collector with N generated agents (scale checks
 // and design work without a cluster).
 const synthetic = Number(params.get('synthetic')) || 0;
@@ -176,6 +211,32 @@ $('#layout').addEventListener('click', (e) => {
 });
 setLayout(looks0.layout, false);
 
+// Decks: linked or independent moves (chain button, Shift+L), reset (button, r).
+function showDeckLink() {
+  const on = scene.decksLinked;
+  const b = $('#deck-link');
+  b.setAttribute('aria-pressed', String(on));
+  b.classList.toggle('unlinked', !on);
+  b.title = on
+    ? 'Decks linked: dragging a deck moves both (Shift+L to unlink). Drag a deck by its rim or Option/Alt-drag it; hold Shift while dragging to change its height'
+    : 'Decks unlinked: each deck moves on its own (Shift+L to link). Drag a deck by its rim or Option/Alt-drag it; hold Shift while dragging to change its height';
+}
+$('#deck-link').addEventListener('click', () => scene.setDecksLinked(!scene.decksLinked));
+$('#deck-reset').addEventListener('click', () => scene.resetDecks());
+showDeckLink();
+
+// Beams: focus (default) or all (header toggle, ?beams=; remembered).
+function setBeams(mode, remember = true) {
+  scene.setBeamMode(beamModeId(mode));
+  document.querySelectorAll('#beams button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.beams === scene.beamMode)));
+  if (remember) rememberBeams(scene.beamMode);
+}
+$('#beams').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-beams]');
+  if (b) setBeams(b.dataset.beams);
+});
+setBeams(looks0.beams, false);
+
 function select(key, fly = true) {
   selected = key;
   scene.select(key);
@@ -211,12 +272,11 @@ let hovered = null;
 function hover(key, x, y) {
   const a = key && model.agents.get(key);
   hovered = a ? key : null;
+  updateCursor();
   if (!a) {
     if (!scene.hoverTile) tip.style.display = 'none';
-    document.body.style.cursor = hoverWorker ? 'pointer' : '';
     return;
   }
-  document.body.style.cursor = 'pointer';
   tip.style.display = 'block';
   tip.style.left = `${x + 14}px`;
   tip.style.top = `${y + 14}px`;
@@ -288,6 +348,18 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'x' && !typing) looks.toggleExtras();
   // Decks: 1 agent deck only, 2 worker deck only, 3 both.
   if (DECK_KEYS[e.key] && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) scene.setDeckView(DECK_KEYS[e.key]);
+  // b switches the beams between focus and all.
+  if (e.key === 'b' && !typing && !e.metaKey && !e.ctrlKey && scene.layout === 'decks') setBeams(scene.beamMode === 'focus' ? 'all' : 'focus');
+  // Shift+L links or unlinks the decks; r resets their layout.
+  if (e.key === 'L' && !typing && scene.layout === 'decks') scene.setDecksLinked(!scene.decksLinked);
+  if ((e.key === 'r' || e.key === 'R') && !typing && !e.metaKey && !e.ctrlKey && scene.layout === 'decks') scene.resetDecks();
+  // Arrow keys pan the view (Shift: further).
+  const arrow = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[e.key];
+  if (arrow && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    const step = e.shiftKey ? 180 : 60;
+    scene.panScreen(arrow[0] * step, arrow[1] * step, scene.camera.position.distanceTo(scene.controls.target));
+  }
 });
 $('#home').addEventListener('click', () => scene.fitCamera());
 
@@ -471,6 +543,7 @@ const perf = new PerfOverlay(
     shape: scene.shape.id,
     group: scene.group,
     layout: scene.layout,
+    ...(scene.layout === 'decks' ? { beams: scene.beamMode } : {}),
     lod: scene.stats().lod,
     quality: scene.stats().quality,
   }),

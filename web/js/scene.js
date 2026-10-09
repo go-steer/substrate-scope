@@ -47,7 +47,7 @@ import { planIsland, slotPosition, slotAt, SlotTable, CELL } from './layout.js';
 import { esc, duration, since, workerLabel, compact } from './format.js';
 import { Effects } from './effects.js';
 import { themeById, classColor, hex } from './themes.js';
-import { buildGround, buildWorkerDeck, clearGroup, hashString } from './island.js';
+import { buildGround, buildWorkerDeck, clearGroup, hashString, roundedRect } from './island.js';
 import { LinkSet } from './links.js';
 import { WorkerPads, PAD_H } from './pads.js';
 import { PARKED, WORKER_STRIP, PAD_SPACING, groupId, groupOf, groupCounts, planWorkerView, planPadArea, focusOf, levelOf, sameFocus, workerUsage, teamHues, teamCSS } from './workers.js';
@@ -56,7 +56,10 @@ import { AggregateTiles } from './tiles.js';
 import { Aggregates, RectIndex, selectNearest, pickRay, cellPixels, depthForPixels, farMix, lodLevel, FAR_LO, FAR_HI, SHAPE_PX, SHAPE_BUDGET } from './lod.js';
 import { FrameStats } from './perf.js';
 import { layoutId, deckViewId, deckAlphas, planWorkerDeck, FlowCounts, ribbonSize, ribbonLevel, litTiles, sameTile, beamSet, BEAM_BUDGET, BEAM_DROP } from './decks.js';
+import { defaultOffsets, copyOffsets, moveDeck, clampOffsets, relOffset, easeOffsets, deckLimits, deckAt, rayAtY, unitsPerPixel } from './decks.js';
+import { beamModeId, focusBeams, BEAM_RECENT, BEAM_RECENT_RATE, BUNDLE } from './decks.js';
 import { BeamSet, RibbonSet } from './beams.js';
+import { Gestures } from './gestures.js';
 
 // The active theme (see themes.js). Every state shares its class color: the
 // five class colors of a theme are validated as a set.
@@ -168,6 +171,10 @@ const POINT_TOP = { running: 1.0, transition: 0.8, suspended: 0.5, crashed: 0.6,
 const MAX_PINNED = 10;
 // Pooled labels for worker platforms in big worker views.
 const PLATFORM_LABELS = 24;
+// Focus beams: how visible the ribbons stay where beams would be (they carry the flow at rest).
+const FOCUS_RIBBONS = 0.22;
+// A deck's grab rim: this many pixels either side of its edge (at least the band's width).
+const RIM_PX = 11;
 
 export class Scene {
   /**
@@ -212,6 +219,28 @@ export class Scene {
     this.beams = null;
     this.ribbons = null;
     this.workerTiles = null;
+    // Beams: 'focus' (only the agent, worker or recent changes in focus;
+    // ribbons carry the rest) or 'all' (up to BEAM_BUDGET). Recent changes:
+    // key -> time its beam stops showing; started at most BEAM_RECENT_RATE a second.
+    this.beamMode = beamModeId(opts.beams);
+    this.recentBeams = new Map();
+    this.beamTokens = BEAM_RECENT_RATE * 2;
+    // Movable decks (decks.js): where the user put them (offsets) and what
+    // is drawn (shown, easing to offsets on a reset). The scene's frame is
+    // the agent deck's: moving the agent deck moves the camera, the sea and
+    // the stars the other way instead (so picking, labels and the level of
+    // detail never need its offset); the worker deck sits at its offset
+    // relative to the agent deck.
+    this.offsets = defaultOffsets();
+    this.shown = defaultOffsets();
+    this.frameShift = { x: 0, y: 0, z: 0 };
+    this.deckLim = null;
+    this.decksEasing = false;
+    // The deck rim (or, with Option/Alt, deck) under the pointer, and a drag in progress.
+    this.handle = null;
+    this.deckDrag = null;
+    this.dragging = null;
+    this.altDown = false;
     // What the user points at; focusOf() turns it into the worker in focus.
     this.hl = { hoverWorker: null, pinnedWorker: null, hoverAgent: null, selectedAgent: null };
     this.focus = { worker: null, strong: false };
@@ -293,7 +322,11 @@ export class Scene {
     controls.maxPolarAngle = Math.PI * 0.47;
     controls.minDistance = 6;
     controls.maxDistance = 600;
-    controls.screenSpacePanning = false;
+    // Panning is in the screen plane (up, down, left, right); right-drag,
+    // Shift+drag and trackpad scrolls are handled by gestures.js so the
+    // point under the cursor stays there. The wheel zooms toward the cursor.
+    controls.screenSpacePanning = true;
+    controls.zoomToCursor = true;
     this.controls = controls;
 
     this.ambient = new THREE.AmbientLight(0xffffff, 0);
@@ -415,10 +448,12 @@ export class Scene {
       this.agentLabels.push(obj);
     }
     this.lastLabelUpdate = 0;
+    this.lastHoverPick = 0;
 
     this.raycaster = new THREE.Raycaster();
     this.pointer = new THREE.Vector2();
     this.bindPointer(labels.domElement);
+    this.gestures = new Gestures(container, this, { onDrag: (kind) => this.handlers.onDrag?.(kind) });
 
     this.resize = this.resize.bind(this);
     window.addEventListener('resize', this.resize);
@@ -440,13 +475,18 @@ export class Scene {
           uSea: { value: new THREE.Color() },
           uSeaA: { value: 0.9 },
           uFade: { value: 0.018 },
+          // The grid moves with the sea (the agent deck's moves shift it);
+          // it fades out around the decks.
+          uOrigin: { value: new THREE.Vector2() },
+          uCenter: { value: new THREE.Vector2() },
         },
         vertexShader: `varying vec3 vP; void main(){ vec4 w = modelMatrix*vec4(position,1.0); vP = w.xyz; gl_Position = projectionMatrix*viewMatrix*w; }`,
-        fragmentShader: `varying vec3 vP; uniform vec3 uGrid; uniform float uGridA; uniform vec3 uSea; uniform float uSeaA; uniform float uFade;
+        fragmentShader: `varying vec3 vP; uniform vec3 uGrid; uniform float uGridA; uniform vec3 uSea; uniform float uSeaA; uniform float uFade; uniform vec2 uOrigin; uniform vec2 uCenter;
           void main(){
-            vec2 g = abs(fract(vP.xz / 4.0 - 0.5) - 0.5) / fwidth(vP.xz / 4.0);
+            vec2 q = (vP.xz - uOrigin) / 4.0;
+            vec2 g = abs(fract(q - 0.5) - 0.5) / fwidth(q);
             float line = 1.0 - min(min(g.x, g.y), 1.0);
-            float d = length(vP.xz);
+            float d = length(vP.xz - uCenter);
             float fade = exp(-d * uFade);
             vec3 c = mix(uSea, uGrid, line * uGridA);
             gl_FragColor = vec4(c, fade * uSeaA);
@@ -881,6 +921,28 @@ export class Scene {
       if (!o.visible && !o.isCSS2DObject) hidden.push(o);
     });
     for (const o of hidden) o.visible = true;
+    // Then draw everything once, off screen: compiling builds the programs,
+    // but buffers upload, vertex layouts bind and drivers (ANGLE on Metal,
+    // SwiftShader) build their pipelines on an object's first draw, which
+    // otherwise lands mid-flight (the beams first draw when the camera
+    // comes in to mid range, effects when the first one plays in view).
+    // Layers with no instances yet draw one, objects out of view too.
+    const restore = [];
+    this.scene.traverse((o) => {
+      if (o.isCSS2DObject) return;
+      const g = o.geometry;
+      if (o.frustumCulled) {
+        o.frustumCulled = false;
+        restore.push(() => (o.frustumCulled = true));
+      }
+      if (o.isInstancedMesh && o.count === 0) {
+        o.count = 1;
+        restore.push(() => (o.count = 0));
+      } else if (g?.isInstancedBufferGeometry && g.instanceCount === 0) {
+        g.instanceCount = 1;
+        restore.push(() => (g.instanceCount = 0));
+      }
+    });
     // Compile the variants the frame uses: the render pass draws into the
     // composer's buffer (no tone mapping, linear output), and three.js keys
     // programs by that, so compiling for the screen would warm the wrong ones.
@@ -888,8 +950,10 @@ export class Scene {
     this.renderer.setRenderTarget(this.composer.readBuffer);
     try {
       this.renderer.compile(this.scene, this.camera);
+      this.renderer.render(this.scene, this.camera);
     } finally {
       this.renderer.setRenderTarget(target);
+      for (const f of restore) f();
       for (const o of hidden) o.visible = false;
       warm();
     }
@@ -1161,6 +1225,7 @@ export class Scene {
         if (this.labelAllowed(rec)) this.pinLabel(key, CHANGE_LABEL_SECONDS);
         this.lastNear.t = -1;
         this.syncLink(rec);
+        if (rec.agent.worker) this.noteRecent(rec);
         this.syncBeam(rec, true);
         continue;
       }
@@ -1182,10 +1247,16 @@ export class Scene {
       if (prevWorker !== ev.agent.worker || prevState !== ev.agent.state) this.syncLink(rec);
       // Decks: a beam drops when the agent gets a worker (wake), retracts
       // when it loses it (suspend), and takes the state's color.
+      // Focus mode: only a few recent changes in view get a beam (they fade after a few seconds).
       if (this.beams) {
         if (prevWorker !== ev.agent.worker) {
-          if (ev.agent.worker) this.syncBeam(rec, true);
-          else this.beams.retract(key, now, BEAM_DROP);
+          if (ev.agent.worker) {
+            this.noteRecent(rec);
+            this.syncBeam(rec, true);
+          } else {
+            if (!this.beams.has(key) && prevWorker && this.noteRecent(rec)) this.beamTo(rec, prevWorker);
+            this.beams.retract(key, now, BEAM_DROP);
+          }
         } else if (prevState !== ev.agent.state) this.beams.setClass(key, CLASS_INDEX[rec.cls]);
       }
       switch (ev.type) {
@@ -1332,15 +1403,26 @@ export class Scene {
       this.poolTile = new Map(this.deck.tiles.map((t) => [t.name, t]));
       this.ribbonW = Math.max(1.2, Math.sqrt(this.island.width * this.island.depth) * 0.014);
       this.ensureDeckLayers();
+      // Grab rims, and the limits a move stays within for this plan.
+      this.handles = {
+        agents: this.buildHandle(this.islandGroup, this.island),
+        workers: this.buildHandle(this.workerGround, this.deck),
+      };
+      this.deckLim = deckLimits(this.deck.gap, Math.max(this.island.width, this.island.depth, this.deck.width, this.deck.depth));
+      this.offsets = clampOffsets(this.offsets, this.deckLim);
+      if (!this.decksEasing) this.shown = copyOffsets(this.offsets);
     } else {
       this.deck = null;
       this.deckGround = null;
       this.poolTile = new Map();
       clearGroup(this.workerGround);
-      this.workerDeck.position.y = 0;
+      this.handles = null;
+      this.deckLim = null;
       this.disposeDeckLayers();
     }
-    this.sea.position.y = decks ? this.deck.y - 2.5 : -1.6;
+    // A fresh plan is framed fresh: the deck offsets apply without moving the camera.
+    this.applyDeckOffsets(false);
+    this.handle = null;
     this.deckFadeAt = null;
     const { width: islandW, depth: islandD } = this.island;
     const span = Math.max(islandW, islandD * 1.5, decks ? this.deck.gap * 2.2 : 0);
@@ -1362,6 +1444,264 @@ export class Scene {
     this.controls.maxDistance = Math.max(600, span * 2.2);
 
     this.buildRouter();
+  }
+
+  /**
+   * A deck's grab rim: a flat band around its slab, shown (faintly) when
+   * the pointer is on the rim or Option/Alt is held over the deck, and
+   * brighter while it is dragged.
+   */
+  buildHandle(group, rect) {
+    const b = Math.min(6, Math.max(1.2, Math.max(rect.width, rect.depth) * 0.018));
+    const r = Math.min(3 + Math.max(rect.width, rect.depth) * 0.004, 7);
+    const outer = roundedRect(rect.width + 2 * b, rect.depth + 2 * b, r + b);
+    outer.holes.push(roundedRect(rect.width, rect.depth, r));
+    const geo = new THREE.ShapeGeometry(outer, 12);
+    geo.rotateX(Math.PI / 2);
+    const mat = new THREE.MeshBasicMaterial({ color: theme.marker.hover, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide, blending: this.blending });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(rect.cx, 0.06, rect.cz);
+    mesh.renderOrder = 6;
+    mesh.visible = false;
+    group.add(mesh);
+    return mesh;
+  }
+
+  /** The worker deck's origin in the scene (its plan's height plus its offset from the agent deck); target: where it is going, not where it is drawn. */
+  workerOrigin(target = false) {
+    if (!this.deck) return new THREE.Vector3(0, 0, 0);
+    const r = relOffset(target ? this.offsets : this.shown);
+    return new THREE.Vector3(r.x, this.deck.y + r.y, r.z);
+  }
+
+  /**
+   * Places the decks for the shown offsets: the worker deck relative to
+   * the agent deck, and (the scene's frame being the agent deck's) the
+   * camera, sea and stars shifted against the agent deck's offset. With
+   * moveCamera false the camera stays (a new plan or a reset frames it).
+   */
+  applyDeckOffsets(moveCamera = true) {
+    const decks = this.layout === 'decks' && !!this.deck;
+    const A = decks ? this.shown.agents : { x: 0, y: 0, z: 0 };
+    const f = this.frameShift;
+    const dx = A.x - f.x;
+    const dy = A.y - f.y;
+    const dz = A.z - f.z;
+    if (moveCamera && (dx || dy || dz)) {
+      this.camera.position.x -= dx;
+      this.camera.position.y -= dy;
+      this.camera.position.z -= dz;
+      this.controls.target.x -= dx;
+      this.controls.target.y -= dy;
+      this.controls.target.z -= dz;
+      this.camera.updateMatrixWorld();
+    }
+    this.frameShift = { x: A.x, y: A.y, z: A.z };
+    const o = this.workerOrigin();
+    this.workerDeck.position.copy(o);
+    this.beams?.setWorkerOffset(o.x, o.y, o.z);
+    this.ribbons?.setWorkerOffset(o.x, o.y, o.z);
+    this.sea.position.set(-A.x, decks ? Math.min(0, o.y) - 2.5 : -1.6, -A.z);
+    this.stars.position.set(-A.x, -A.y, -A.z);
+    const su = this.sea.material.uniforms;
+    su.uOrigin.value.set(-A.x, -A.z);
+    if (decks) su.uCenter.value.set((this.island.cx + this.deck.cx + o.x) / 2, (this.island.cz + this.deck.cz + o.z) / 2);
+    else su.uCenter.value.set(0, 0);
+    // Labels follow on the next pass.
+    this.lastLabelUpdate = -1;
+  }
+
+  /** Sets the decks' offsets (from storage, or a test) and draws them; linked stays as given. */
+  setDeckOffsets(o) {
+    this.offsets = this.deckLim ? clampOffsets(o, this.deckLim) : copyOffsets(o);
+    this.shown = copyOffsets(this.offsets);
+    this.decksEasing = false;
+    this.applyDeckOffsets(false);
+  }
+
+  /** A copy of the decks' offsets (where the user put them). */
+  copyDeckOffsets() {
+    return copyOffsets(this.offsets);
+  }
+
+  /** Whether dragging a deck moves both (linked) or just that one. */
+  setDecksLinked(on) {
+    this.offsets.linked = this.shown.linked = !!on;
+    this.handlers.onDecksChanged?.(this.offsets);
+  }
+
+  get decksLinked() {
+    return this.offsets.linked;
+  }
+
+  /** Puts the decks back where the plan puts them (animated unless instant or reduced motion) and frames the camera. */
+  resetDecks(instant = false) {
+    const linked = this.offsets.linked;
+    this.offsets = { ...defaultOffsets(), linked };
+    if (instant || this.reducedMotion || this.layout !== 'decks') {
+      this.shown = copyOffsets(this.offsets);
+      this.decksEasing = false;
+      this.applyDeckOffsets(false);
+    } else this.decksEasing = true;
+    if (this.island) this.fitCamera(!instant);
+    this.handlers.onDecksChanged?.(this.offsets);
+  }
+
+  /**
+   * The deck under a client position: its rim, or (any) anywhere on it
+   * ({id, zone, x, z, y, t}: x, z in the deck's coordinates), or null.
+   * Faded-out decks can't be grabbed.
+   */
+  deckHandleAt(clientX, clientY, any = false) {
+    if (this.layout !== 'decks' || !this.deck || !this.island || this.cameraDriver) return null;
+    const ray = this.rayAt(clientX, clientY);
+    const o = this.workerOrigin();
+    const I = this.island;
+    const D = this.deck;
+    const decks = [];
+    if (this.deckA.agents > 0.5) decks.push({ id: 'agents', rect: I, y: 0, off: { x: 0, z: 0 } });
+    if (this.deckA.workers > 0.5) decks.push({ id: 'workers', rect: D, y: o.y, off: { x: o.x, z: o.z } });
+    const vh = this.viewH();
+    const fov = this.camera.fov;
+    const hit = deckAt(ray.origin, ray.direction, decks, (t) => Math.max(0.6, unitsPerPixel(t, fov, vh) * RIM_PX));
+    if (!hit) return null;
+    if (hit.zone !== 'rim' && !any) return null;
+    return hit;
+  }
+
+  /** Shows the grab rim of the deck under the pointer (null: none). */
+  setHandle(h) {
+    const changed = (h?.id || null) !== (this.handle?.id || null) || (h?.zone || null) !== (this.handle?.zone || null);
+    this.handle = h;
+    if (!changed) return;
+    this.styleHandles();
+    this.handlers.onDeckHandle?.(h);
+  }
+
+  /** Grab rims: faint on hover, brighter while dragging (both decks when linked). */
+  styleHandles() {
+    if (!this.handles) return;
+    const drag = this.deckDrag;
+    for (const [k, m] of Object.entries(this.handles)) {
+      const on = drag ? k === drag.id || drag.linked : this.handle?.id === k;
+      m.visible = on;
+      m.material.color.set(theme.marker.hover);
+      if (m.material.blending !== this.blending) {
+        m.material.blending = this.blending;
+        m.material.needsUpdate = true;
+      }
+      m.material.opacity = drag ? (k === drag.id ? 0.7 : 0.4) : 0.5;
+    }
+  }
+
+  /**
+   * Starts (or, hit null, re-anchors) dragging a deck at a client position:
+   * vertical changes its height (the gap), else it slides in its plane with
+   * the point grabbed staying under the pointer. Positions are kept in
+   * absolute terms (the scene's frame plus the agent deck's offset), which
+   * don't change as the frame shifts during the drag.
+   */
+  startDeckDrag(hit, clientX, clientY, vertical = false) {
+    if (!this.deck) return;
+    const id = hit ? hit.id : this.deckDrag?.id;
+    if (!id) return;
+    const A = this.shown.agents;
+    const o = this.workerOrigin();
+    const planeY = id === 'agents' ? 0 : o.y;
+    const ray = this.rayAt(clientX, clientY);
+    const p = rayAtY(ray.origin, ray.direction, planeY) || { x: ray.origin.x, z: ray.origin.z, t: this.camera.position.distanceTo(this.controls.target) };
+    this.decksEasing = false;
+    this.shown = copyOffsets(this.offsets);
+    this.deckDrag = {
+      id,
+      vertical,
+      linked: this.offsets.linked,
+      start: copyOffsets(this.offsets),
+      planeAbs: planeY + A.y,
+      anchor: { x: p.x + A.x, z: p.z + A.z },
+      y0: clientY,
+      upp: unitsPerPixel(Math.max(1, p.t), this.camera.fov, this.viewH()),
+    };
+    this.flyAnim = null;
+    this.styleHandles();
+  }
+
+  /** Moves the dragged deck to follow the pointer. */
+  dragDeck(clientX, clientY) {
+    const g = this.deckDrag;
+    if (!g || !this.deckLim) return;
+    let next;
+    if (g.vertical) {
+      next = moveDeck(g.start, g.id, { y: -(clientY - g.y0) * g.upp }, this.deckLim);
+    } else {
+      const A = this.shown.agents;
+      const ray = this.rayAt(clientX, clientY);
+      const origin = { x: ray.origin.x + A.x, y: ray.origin.y + A.y, z: ray.origin.z + A.z };
+      const p = rayAtY(origin, ray.direction, g.planeAbs);
+      if (!p) return;
+      next = moveDeck(g.start, g.id, { x: p.x - g.anchor.x, z: p.z - g.anchor.z }, this.deckLim);
+    }
+    this.offsets = next;
+    this.shown = copyOffsets(next);
+    this.applyDeckOffsets(true);
+  }
+
+  /** Ends a deck drag; the new arrangement is remembered. */
+  endDeckDrag() {
+    if (!this.deckDrag) return;
+    this.deckDrag = null;
+    this.styleHandles();
+    this.setHandle(null);
+    this.handlers.onDecksChanged?.(this.offsets);
+  }
+
+  /** Eases the drawn offsets toward the target (after a reset). */
+  updateDeckEase(dt) {
+    if (!this.decksEasing) return;
+    const k = 1 - Math.exp(-dt * 7);
+    const { offsets, moving } = easeOffsets(this.shown, this.offsets, k);
+    this.shown = offsets;
+    this.decksEasing = moving;
+    this.applyDeckOffsets(false);
+  }
+
+  /**
+   * Depth (camera space) of what is under a client position: a deck's
+   * plane where the pointer is over one, else the orbit target's height,
+   * else the target's distance. Pans move the scene by screen pixels at
+   * that depth, so the point grabbed stays under the pointer.
+   */
+  grabDepth(clientX, clientY) {
+    const ray = this.rayAt(clientX, clientY);
+    const fwd = this.camera.getWorldDirection(new THREE.Vector3());
+    const cos = Math.max(0.05, fwd.dot(ray.direction));
+    const hit = this.deckHandleAt(clientX, clientY, true);
+    let t = hit ? hit.t : null;
+    if (t === null) t = rayAtY(ray.origin, ray.direction, this.controls.target.y)?.t ?? null;
+    const maxT = this.camera.far * 0.5;
+    if (t === null || t > maxT) return this.camera.position.distanceTo(this.controls.target);
+    return t * cos;
+  }
+
+  /** Pans the camera in the screen plane by pixels (right and down positive), at depth (the point there tracks the pointer). */
+  panScreen(dxPx, dyPx, depth) {
+    if (this.cameraDriver) return;
+    const upp = unitsPerPixel(Math.max(0.5, depth), this.camera.fov, this.viewH());
+    this.camera.updateMatrixWorld();
+    const right = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0);
+    const up = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 1);
+    const move = right.multiplyScalar(-dxPx * upp).add(up.multiplyScalar(dyPx * upp));
+    this.camera.position.add(move);
+    this.controls.target.add(move);
+    this.camera.updateMatrixWorld();
+    this.flyAnim = null;
+  }
+
+  /** A click (no drag) at a client position: selects the agent or worker there, or clears. */
+  clickAt(clientX, clientY) {
+    const key = this.pick(clientX, clientY);
+    const worker = key ? null : this.pickWorker(clientX, clientY);
+    this.handlers.onPick?.(key, worker);
   }
 
   setShadowSpan(span, x, z) {
@@ -1406,13 +1746,16 @@ export class Scene {
     // never compete with the agent deck's), so both decks stay labeled.
     this.deckBoxes = [];
     if (this.deck && this.deckA.workers > 0.5) {
-      const y = this.deck.y;
-      const ds = this.deck.frames.filter((f) => f.label).map((f) => ({ el: f.label, x0: f.x, x1: f.x + f.w, z: f.z + f.d / 2, ax: f.x + 0.5, az: f.z + (f.strip ?? 2) / 2, area: f.w * f.d, y }));
+      const o = this.workerOrigin();
+      const y = o.y;
+      const ds = this.deck.frames
+        .filter((f) => f.label)
+        .map((f) => ({ el: f.label, x0: f.x + o.x, x1: f.x + f.w + o.x, z: f.z + f.d / 2 + o.z, ax: f.x + 0.5 + o.x, az: f.z + (f.strip ?? 2) / 2 + o.z, area: f.w * f.d, y }));
       // A worker's card (hovered or pinned) wins over the pool labels around it.
       const obstacles = [...(this.deckTitleBoxes || [])];
       const pad = this.focus.strong && this.pads.get(this.focus.worker);
       if (pad) {
-        const q = new THREE.Vector3(pad.x, y + 0.2, pad.z + 1.15).project(this.camera);
+        const q = new THREE.Vector3(pad.x + o.x, y + 0.2, pad.z + 1.15 + o.z).project(this.camera);
         const sx = (q.x * 0.5 + 0.5) * this.renderer.domElement.clientWidth;
         const sy = (-q.y * 0.5 + 0.5) * this.renderer.domElement.clientHeight;
         obstacles.push({ x0: sx - 130, x1: sx + 130, y0: sy - 6, y1: sy + 135 });
@@ -1479,7 +1822,8 @@ export class Scene {
     const I = this.island;
     const D = this.deck;
     L.agents.position.set(I.cx + I.width / 2 + 1.5, 0, I.cz);
-    L.workers.position.set(D.cx + D.width / 2 + 1.5, D.y, D.cz);
+    const o = this.workerOrigin();
+    L.workers.position.set(D.cx + D.width / 2 + 1.5 + o.x, o.y, D.cz + o.z);
     L.agents.center.set(0, 0.5);
     L.workers.center.set(0, 0.5);
     L.agents.visible = this.deckA.agents > 0.5;
@@ -1663,7 +2007,11 @@ export class Scene {
     if (this.beams) return;
     this.beams = new BeamSet(this.world, this.time, this.look, this.fade.beams);
     this.beams.uniforms.uDrop.value = BEAM_DROP;
+    this.beams.setBundle(this.beamMode === 'focus' ? BUNDLE : 0);
+    // 'all' fills up to the budget: room up front, so the buffers don't grow mid-flight.
+    if (this.beamMode === 'all') this.beams.reserve(BEAM_BUDGET);
     this.ribbons = new RibbonSet(this.world, this.time, this.look, this.fade.beams);
+    this.ribbons.setMin(this.beamMode === 'focus' ? FOCUS_RIBBONS : 0);
     this.workerTiles = new AggregateTiles(this.workerDeck, this.time, this.look, { y: PAD_H + 0.12, cell: PAD_SPACING, fade: this.fade.workers });
     this.beamKeys = new Set();
     this.applyFlow();
@@ -1741,12 +2089,36 @@ export class Scene {
     this.workerTiles?.tiles.forEach((t, i) => this.workerTiles.write(i, this.poolCounts(t), this.tileLit('pool', t.name)));
   }
 
-  /** Whether an agent gets a beam: it holds a worker with a pad, and fits the budget (or must show). */
+  /**
+   * Whether an agent gets a beam: it holds a worker with a pad, and (focus
+   * mode) it must show or just changed, or ('all') it fits the budget or
+   * must show.
+   */
   beamAllowed(rec) {
     const w = rec.agent.worker;
     if (!this.beams || !w || !this.pads.get(w)) return false;
+    if (this.beamMode === 'focus') return this.beamMust(rec) || (this.recentBeams.get(rec.key) || 0) > this.time.value;
     if (!this.beamsTrimmed) return true;
-    return this.beamKeys.has(rec.key) || rec.key === this.selected || rec.key === this.hovered || w === this.focus.worker;
+    return this.beamKeys.has(rec.key) || this.beamMust(rec);
+  }
+
+  /** Whether beams are picked per agent (focus mode, or 'all' over the budget), so focus changes add and drop them. */
+  get beamsSelective() {
+    return this.beamMode === 'focus' || this.beamsTrimmed;
+  }
+
+  /** 'focus' or 'all' (see decks.js BEAM_MODES); re-picks the beams. */
+  setBeamMode(mode) {
+    const m = beamModeId(mode);
+    if (m === this.beamMode) return;
+    this.beamMode = m;
+    this.recentBeams.clear();
+    if (!this.beams) return;
+    this.beams.setBundle(m === 'focus' ? BUNDLE : 0);
+    if (m === 'all') this.beams.reserve(BEAM_BUDGET);
+    this.beams.clear();
+    this.rebeamAll();
+    this.relevelRibbons();
   }
 
   /** Adds, moves or drops an agent's beam; drop: animate it falling to the pad (a wake). */
@@ -1756,9 +2128,43 @@ export class Scene {
       if (!this.beams.retracting.has(rec.key)) this.beams.remove(rec.key);
       return;
     }
-    const pad = this.pads.get(rec.agent.worker);
-    const to = { x: pad.pos.x, y: pad.pos.y + this.deck.y, z: pad.pos.z };
-    this.beams.set(rec.key, { x: rec.x, y: 0.1, z: rec.z }, to, CLASS_INDEX[rec.cls], this.workerIndex(rec.agent.worker), rec.seed, rec.idx, drop ? this.time.value : undefined);
+    this.beamTo(rec, rec.agent.worker, drop);
+    // Focus mode: a recent change's beam fades out when its time is up (unless it must show).
+    if (this.beamMode === 'focus' && !this.beamMust(rec)) {
+      const until = this.recentBeams.get(rec.key);
+      if (until) this.beams.fadeOut(rec.key, until);
+    }
+  }
+
+  /** Writes an agent's beam to a worker's pad (the pad end in the worker deck's coordinates), bundled with its atespace -> pool pair. */
+  beamTo(rec, worker, drop = false) {
+    const pad = this.pads.get(worker);
+    if (!pad) return false;
+    const d = this.plan.districts.get(rec.group);
+    const t = this.poolTile.get(this.deck.poolOf.get(worker));
+    const bundle = d && t ? { dx: d.x + d.w / 2, dz: d.z + d.d / 2, qx: t.x + t.w / 2, qz: t.z + t.d / 2 } : undefined;
+    this.beams.set(rec.key, { x: rec.x, y: 0.1, z: rec.z }, pad.pos, CLASS_INDEX[rec.cls], this.workerIndex(worker), rec.seed, rec.idx, drop ? this.time.value : undefined, bundle);
+    return true;
+  }
+
+  /** Whether an agent's beam must show: it is selected or hovered, or its worker is in focus. */
+  beamMust(rec) {
+    return rec.key === this.selected || rec.key === this.hovered || (!!rec.agent.worker && rec.agent.worker === this.focus.worker);
+  }
+
+  /**
+   * Focus mode: whether a wake or suspend gets a beam for a few seconds
+   * (in view, and at most BEAM_RECENT_RATE a second); records it.
+   */
+  noteRecent(rec) {
+    if (this.beamMode !== 'focus' || this.beamTokens < 1) return false;
+    if (!this.allShapes) {
+      const p = new THREE.Vector3(rec.x, 0.5, rec.z);
+      if (!this.frustum().containsPoint(p)) return false;
+    }
+    this.beamTokens -= 1;
+    this.recentBeams.set(rec.key, this.time.value + BEAM_RECENT);
+    return true;
   }
 
   /**
@@ -1770,12 +2176,19 @@ export class Scene {
   rebeamAll() {
     if (!this.beams) return;
     const must = [this.selected, this.hovered, ...(this.byWorker.get(this.focus.worker) || [])].filter(Boolean);
-    const sel = beamSet(this.holders, BEAM_BUDGET, () => this.nearestHolders(), must);
-    this.beamsTrimmed = sel.trimmed;
-    this.beamKeys = sel.keys;
-    for (const k of [...this.beams.keys]) if (!sel.keys.has(k) && !this.beams.retracting.has(k)) this.beams.remove(k);
-    for (const k of sel.keys) if (!this.beams.has(k)) this.syncBeam(this.recs.get(k));
-    this.ribbons.setMin(this.beamsTrimmed ? 0.12 : 0);
+    let keys;
+    if (this.beamMode === 'focus') {
+      keys = focusBeams(this.holders, must, this.recentBeams, this.time.value);
+      this.beamsTrimmed = false;
+    } else {
+      const sel = beamSet(this.holders, BEAM_BUDGET, () => this.nearestHolders(), must);
+      this.beamsTrimmed = sel.trimmed;
+      keys = sel.keys;
+    }
+    this.beamKeys = keys;
+    for (const k of [...this.beams.keys]) if (!keys.has(k) && !this.beams.leaving(k)) this.beams.remove(k);
+    for (const k of keys) if (!this.beams.has(k) || this.beams.fading.has(k)) this.syncBeam(this.recs.get(k));
+    this.ribbons.setMin(this.beamMode === 'focus' ? FOCUS_RIBBONS : this.beamsTrimmed ? 0.12 : 0);
     this.styleDecks();
     this.applyBeamFocus();
   }
@@ -1830,10 +2243,10 @@ export class Scene {
       this.ribbons.set(
         key,
         { x: d.x + d.w / 2, y: -2, z: d.z + d.d / 2 },
-        { x: t.x + t.w / 2, y: this.deck.y + PAD_H + 0.2, z: t.z + t.d / 2 },
+        { x: t.x + t.w / 2, y: PAD_H + 0.2, z: t.z + t.d / 2 },
         width,
         strength,
-        ribbonLevel(p, this.hoverTile, focusPool, f.strong),
+        ribbonLevel(p, this.hoverTile, focusPool, f.strong, this.beamMode === 'focus'),
         hashString(key),
       );
     }
@@ -1846,7 +2259,7 @@ export class Scene {
     const focusPool = f.worker ? this.deck.poolOf.get(f.worker) : null;
     for (const key of this.ribbons.keys) {
       const p = this.flows.pairs.get(key);
-      if (p) this.ribbons.setLevel(key, ribbonLevel(p, this.hoverTile, focusPool, f.strong));
+      if (p) this.ribbons.setLevel(key, ribbonLevel(p, this.hoverTile, focusPool, f.strong, this.beamMode === 'focus'));
     }
   }
 
@@ -1896,9 +2309,12 @@ export class Scene {
       if (d && this.farAt(p.x, 0, p.z, CELL)) return { kind: 'atespace', name: d.name };
     }
     if (this.deckA.workers > 0.5) {
-      const y = this.deck.y + PAD_H;
+      const o = this.workerOrigin();
+      const y = o.y + PAD_H;
       const p = at(y);
-      const t = p && this.deck.tiles.find((q) => p.x >= q.x && p.x <= q.x + q.w && p.z >= q.z && p.z <= q.z + q.d);
+      const lx = p ? p.x - o.x : 0;
+      const lz = p ? p.z - o.z : 0;
+      const t = p && this.deck.tiles.find((q) => lx >= q.x && lx <= q.x + q.w && lz >= q.z && lz <= q.z + q.d);
       if (t && this.farAt(p.x, y, p.z, PAD_SPACING)) return { kind: 'pool', name: t.name };
     }
     return null;
@@ -2155,11 +2571,12 @@ export class Scene {
       const lit = !!(this.focus.worker || this.selected || this.hovered);
       const shown = this.fade.beams.value > 0.004;
       this.beams.lines.visible = shown && (lit || farMix(cellPixels(nearest, vh, fov) * 1.5) < 1);
-      this.ribbons.mesh.visible = shown && (this.beamsTrimmed || !!this.hoverTile || farMix(cellPixels(farthest, vh, fov)) > 0);
+      this.ribbons.mesh.visible = shown && (this.beamMode === 'focus' || this.beamsTrimmed || !!this.hoverTile || farMix(cellPixels(farthest, vh, fov)) > 0);
     }
     if (this.workerTiles && this.deck) {
       const D = this.deck;
-      const far = this.camera.position.distanceTo(new THREE.Vector3(D.cx, D.y, D.cz)) + Math.max(D.width, D.depth);
+      const o = this.workerOrigin();
+      const far = this.camera.position.distanceTo(new THREE.Vector3(D.cx + o.x, o.y, D.cz + o.z)) + Math.max(D.width, D.depth);
       this.workerTiles.mesh.visible = farMix(cellPixels(far, this.viewH(), this.camera.fov, PAD_SPACING)) > 0;
     }
   }
@@ -2191,7 +2608,7 @@ export class Scene {
     this.pads.setFocus(f);
     // Beams: the focused worker's agents must have one (budget or not).
     if (this.beams) {
-      if (this.beamsTrimmed) for (const w of new Set([before, f.worker])) for (const k of this.byWorker.get(w) || []) this.syncBeam(this.recs.get(k));
+      if (this.beamsSelective) for (const w of new Set([before, f.worker])) for (const k of this.byWorker.get(w) || []) this.syncBeam(this.recs.get(k));
       this.applyBeamFocus();
       this.relevelRibbons();
     }
@@ -2215,7 +2632,7 @@ export class Scene {
     const pad = this.pads.get(name);
     if (!pad) return;
     const d = this.group === 'worker' && this.plan.districts.get(name);
-    const target = d ? new THREE.Vector3(d.x + d.w / 2, 0.5, d.z + d.d / 2) : pad.pos.clone().setY(pad.pos.y + (this.deck?.y || 0));
+    const target = d ? new THREE.Vector3(d.x + d.w / 2, 0.5, d.z + d.d / 2) : pad.pos.clone().add(this.workerOrigin(true));
     const dir = this.camera.position.clone().sub(this.controls.target).normalize();
     const dist = Math.max(Math.min(this.camera.position.distanceTo(this.controls.target), 60), 40);
     this.flyAnim = { t0: this.time.value, dur: 0.9, fromT: this.controls.target.clone(), toT: target, fromC: this.camera.position.clone(), toC: target.clone().add(dir.multiplyScalar(dist)) };
@@ -2280,17 +2697,24 @@ export class Scene {
    */
   fitDecks(smooth, W, inset) {
     const I = this.island;
-    const D = this.deck;
+    // The worker deck where it is going (a reset frames the arrangement it eases to).
+    const o = this.workerOrigin(true);
+    const D = { cx: this.deck.cx + o.x, cz: this.deck.cz + o.z, width: this.deck.width, depth: this.deck.depth, y: o.y };
     const view = this.deckView;
     let toT;
     let toC;
     if (view === 'both') {
-      const span = Math.max(I.width, D.width, I.depth * 1.5, D.depth * 1.5);
+      // The box around both decks (they may have been pulled apart).
+      const x0 = Math.min(I.cx - I.width / 2, D.cx - D.width / 2);
+      const x1 = Math.max(I.cx + I.width / 2, D.cx + D.width / 2);
+      const z0 = Math.min(I.cz - I.depth / 2, D.cz - D.depth / 2);
+      const z1 = Math.max(I.cz + I.depth / 2, D.cz + D.depth / 2);
+      const span = Math.max(x1 - x0, I.width, D.width, (z1 - z0) * 1.2, I.depth * 1.5, D.depth * 1.5);
       const height = Math.abs(D.y);
       const dist = Math.max(34, span * 1.12, height * 2.9) * (W / (W - inset));
       const viewW = 2 * dist * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) * this.camera.aspect;
-      const cx = I.cx - (inset / 2 / W) * viewW;
-      const cz = I.cz + I.depth * 0.08;
+      const cx = (x0 + x1) / 2 - (inset / 2 / W) * viewW;
+      const cz = (z0 + z1) / 2 + (z1 - z0) * 0.08;
       toT = new THREE.Vector3(cx, D.y * 0.42, cz);
       toC = new THREE.Vector3(cx + dist * 0.12, D.y * 0.42 + dist * 0.43, cz + dist * 0.9);
     } else {
@@ -2373,12 +2797,19 @@ export class Scene {
       if (!down) return;
       const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
       down = null;
+      // A long press that picked up a deck (touch) isn't a click.
+      if (this.suppressClick) {
+        this.suppressClick = false;
+        return;
+      }
       if (moved > 5) return;
-      const key = this.pick(e.clientX, e.clientY);
-      const worker = key ? null : this.pickWorker(e.clientX, e.clientY);
-      this.handlers.onPick?.(key, worker);
+      this.clickAt(e.clientX, e.clientY);
     });
     el.addEventListener('pointermove', (e) => {
+      if (this.altDown !== e.altKey) {
+        this.altDown = e.altKey;
+        this.lastHoverPick = -1;
+      }
       if (down) return;
       this.hoverAt = { x: e.clientX, y: e.clientY };
     });
@@ -2386,6 +2817,7 @@ export class Scene {
       this.hoverAt = null;
       this.setHover(null);
       this.setHoverWorker(null);
+      if (!this.dragging) this.setHandle(null);
     });
   }
 
@@ -2428,9 +2860,10 @@ export class Scene {
     if (this.layout === 'decks' && this.deckA.workers < 0.5) return null;
     const ray = this.rayAt(clientX, clientY);
     if (ray.direction.y > -1e-4) return null;
-    const t = (PAD_H + (this.deck?.y || 0) - ray.origin.y) / ray.direction.y;
+    const o = this.workerOrigin();
+    const t = (PAD_H + o.y - ray.origin.y) / ray.direction.y;
     if (t <= 0) return null;
-    return this.pads.at(ray.origin.x + ray.direction.x * t, ray.origin.z + ray.direction.z * t);
+    return this.pads.at(ray.origin.x + ray.direction.x * t - o.x, ray.origin.z + ray.direction.z * t - o.z);
   }
 
   setHover(key, x, y) {
@@ -2442,7 +2875,7 @@ export class Scene {
       if (rec) this.hoverRing.position.set(rec.x, 0.15, rec.z);
       this.hl.hoverAgent = key || null;
       for (const k of [before, key]) if (k) this.syncLink(this.recs.get(k));
-      if (this.beamsTrimmed) for (const k of [before, key]) if (k) this.syncBeam(this.recs.get(k));
+      if (this.beamsSelective) for (const k of [before, key]) if (k) this.syncBeam(this.recs.get(k));
       this.refreshFocus();
       this.applyBeamFocus();
     }
@@ -2505,6 +2938,8 @@ export class Scene {
     this.time.value += dt;
     const t = this.time.value;
     this.fxTokens = Math.min(FX_RATE * 2, this.fxTokens + dt * FX_RATE);
+    this.beamTokens = Math.min(BEAM_RECENT_RATE * 2, this.beamTokens + dt * BEAM_RECENT_RATE);
+    this.updateDeckEase(dt);
 
     if (this.replanAt >= 0 && t >= this.replanAt && this.model) this.replan(false, this.group === 'worker');
 
@@ -2590,7 +3025,7 @@ export class Scene {
     this.points.flush();
     this.links.flush();
     if (this.beams) {
-      this.beams.expire(t);
+      if (this.beams.expire(t)) for (const [k, until] of this.recentBeams) if (until + 2 < t) this.recentBeams.delete(k);
       this.beams.flush();
       this.ribbons.flush();
     }
@@ -2604,13 +3039,18 @@ export class Scene {
 
     this.effects.update(t);
 
-    if (this.hoverAt && t - (this.lastHoverPick || 0) > 0.05) {
+    if (this.hoverAt && !this.dragging && (t - this.lastHoverPick > 0.05 || this.lastHoverPick < 0)) {
       this.lastHoverPick = t;
-      const key = this.pick(this.hoverAt.x, this.hoverAt.y);
-      this.setHover(key, this.hoverAt.x, this.hoverAt.y);
-      const worker = key ? null : this.pickWorker(this.hoverAt.x, this.hoverAt.y);
+      const { x, y } = this.hoverAt;
+      // Option/Alt over a deck grabs the deck, not what is on it.
+      const grab = this.altDown ? this.deckHandleAt(x, y, true) : null;
+      const key = grab ? null : this.pick(x, y);
+      this.setHover(key, x, y);
+      const worker = key || grab ? null : this.pickWorker(x, y);
       this.setHoverWorker(worker);
-      if (this.deck) this.setHoverTile(key || worker ? null : this.pickTile(this.hoverAt.x, this.hoverAt.y));
+      const handle = grab || (key || worker ? null : this.deckHandleAt(x, y, false));
+      this.setHandle(handle);
+      if (this.deck) this.setHoverTile(key || worker || handle ? null : this.pickTile(x, y));
     }
 
     if (t - this.lastLabelUpdate > LABEL_EVERY || this.lastLabelUpdate < 0) {
@@ -2619,8 +3059,8 @@ export class Scene {
       this.flushPads();
       if (this.beams) {
         this.flushRibbons();
-        // Crossing the beam budget either way re-picks the beams.
-        if (this.beamsTrimmed !== this.holders.size > BEAM_BUDGET) this.rebeamAll();
+        // Crossing the beam budget either way re-picks the beams ('all' mode).
+        if (this.beamMode === 'all' && this.beamsTrimmed !== this.holders.size > BEAM_BUDGET) this.rebeamAll();
         else if (Math.abs(this.beams.count - this.beamCountStyled) > this.beamCountStyled * 0.1) this.styleDecks();
       }
       if (this.labelsDirty) this.updateDistrictLabels();
@@ -2699,9 +3139,9 @@ export class Scene {
     const items = [];
     const wp = new THREE.Vector3();
     const fr = this.frustum();
-    const y0 = this.deck?.y || 0;
+    const o = this.workerOrigin();
     for (const [name, p] of this.pads.pads) {
-      wp.set(p.x, y0 + 0.2, p.z + 2.6);
+      wp.set(p.x + o.x, o.y + 0.2, p.z + 2.6 + o.z);
       const focused = name === this.focus.worker;
       const card = focused && this.focus.strong;
       const notable = !!p.worker.state && p.worker.state !== 'ACTIVE';
