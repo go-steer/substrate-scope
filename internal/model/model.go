@@ -135,6 +135,12 @@ type Worker struct {
 	// CapacityActors and AllocatedActors are the worker's actor slots.
 	CapacityActors  int32 `json:"capacityActors"`
 	AllocatedActors int32 `json:"allocatedActors"`
+	// CPU and memory capacity and allocation, as Kubernetes quantities
+	// ("4", "500m", "16Gi"); empty when the worker doesn't report them.
+	CapacityCPU     string `json:"capacityCpu,omitempty"`
+	CapacityMemory  string `json:"capacityMemory,omitempty"`
+	AllocatedCPU    string `json:"allocatedCpu,omitempty"`
+	AllocatedMemory string `json:"allocatedMemory,omitempty"`
 	// Actors are the keys of the actors assigned to this worker.
 	Actors []string `json:"actors,omitempty"`
 }

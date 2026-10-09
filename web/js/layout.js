@@ -127,7 +127,7 @@ export function planIsland(atespaces) {
       const capacity = cols * rows;
       const need = atespaces.find((a) => a.name === rc.key)?.count ?? 0;
       if (capacity < Math.max(need, 1)) fits = false;
-      districts.set(rc.key, { name: rc.key, x: rc.x + GAP / 2, z: rc.y + GAP / 2, w, d, cols, rows, capacity });
+      districts.set(rc.key, { name: rc.key, kind: 'atespace', x: rc.x + GAP / 2, z: rc.y + GAP / 2, w, d, cols, rows, capacity });
     }
     if (fits) return { width, depth, districts };
     area *= 1.15;
@@ -137,15 +137,17 @@ export function planIsland(atespaces) {
 
 /**
  * World position (center of the cell floor) of a slot in a district. Slots
- * fill rows front-to-back, left-to-right, centered in the district.
+ * fill rows front-to-back, left-to-right, centered in the district. A
+ * district may set its own label strip depth (strip).
  */
 export function slotPosition(district, slot) {
   const col = slot % district.cols;
   const row = Math.floor(slot / district.cols);
+  const strip = district.strip ?? LABEL_STRIP;
   const gridW = district.cols * CELL;
   const gridD = district.rows * CELL;
   const x0 = district.x + (district.w - gridW) / 2;
-  const z0 = district.z + LABEL_STRIP + (district.d - LABEL_STRIP - gridD) / 2;
+  const z0 = district.z + strip + (district.d - strip - gridD) / 2;
   return { x: x0 + (col + 0.5) * CELL, z: z0 + (row + 0.5) * CELL };
 }
 

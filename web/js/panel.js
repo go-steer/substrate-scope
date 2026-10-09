@@ -240,7 +240,12 @@ export class Panel {
     const d = this.detail;
     const a = d.agent;
     return [
-      row('Worker', a.worker ? `${esc(workerLabel(d.worker) || a.workerPod || a.worker)}${a.workerNode ? `<span class="muted"> on ${esc(a.workerNode)}</span>` : ''}` : '<span class="muted">none</span>'),
+      row(
+        'Worker',
+        a.worker
+          ? `${esc(workerLabel(d.worker) || a.workerPod || a.worker)}${a.workerNode ? `<span class="muted"> on ${esc(a.workerNode)}</span>` : ''}${this.opts.onShowWorker ? ` <button class="linkbtn" data-act="show-worker" data-worker="${esc(a.worker)}" title="Light up this worker and the agents on it">show worker</button>` : ''}`
+          : '<span class="muted">none</span>',
+      ),
       row('Template', a.template && mono(a.template)),
       row('Snapshot', a.snapshotURI ? mono(a.snapshotURI.replace(/^gs:\/\/[^/]+\//, '…/')) : '<span class="muted">none yet</span>'),
       a.snapshotInProgress ? row('Snapshot', '<span class="busy">in progress</span>') : '',
@@ -390,6 +395,9 @@ export class Panel {
     switch (btn.dataset.act) {
       case 'close':
         this.opts.onClose();
+        break;
+      case 'show-worker':
+        this.opts.onShowWorker?.(btn.dataset.worker);
         break;
       case 'sessions':
         this.listSessions(false);

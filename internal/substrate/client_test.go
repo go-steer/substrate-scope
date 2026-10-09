@@ -97,3 +97,33 @@ func TestToAgent(t *testing.T) {
 		t.Fatalf("ToAgent = %+v", a)
 	}
 }
+
+func TestToWorker(t *testing.T) {
+	res := func(cpu, mem string) *ateapipb.Resources {
+		return &ateapipb.Resources{Limits: []*ateapipb.Limits{{Name: "cpu", Quantity: cpu}, {Name: "memory", Quantity: mem}}}
+	}
+	w := ToWorker(&ateapipb.Worker{
+		Metadata:  &ateapipb.ResourceMetadata{Name: "w-1"},
+		WorkerPod: "atelet-abc",
+		NodeName:  "node-1",
+		Status: &ateapipb.WorkerStatus{
+			State:     ateapipb.WorkerState_WORKER_STATE_ACTIVE,
+			Capacity:  &ateapipb.WorkerResources{Actors: 40, Resources: res("16", "64Gi")},
+			Allocated: &ateapipb.WorkerResources{Actors: 3, Resources: res("750m", "3Gi")},
+		},
+	}, []*ateapipb.ActorAssignment{{Actor: &ateapipb.ObjectRef{Atespace: "a", Name: "b"}}})
+	if w.State != "ACTIVE" || w.Node != "node-1" || w.CapacityActors != 40 || w.AllocatedActors != 3 {
+		t.Fatalf("ToWorker = %+v", w)
+	}
+	if w.CapacityCPU != "16" || w.CapacityMemory != "64Gi" || w.AllocatedCPU != "750m" || w.AllocatedMemory != "3Gi" {
+		t.Fatalf("ToWorker resources = %+v", w)
+	}
+	if len(w.Actors) != 1 || w.Actors[0] != "a/b" {
+		t.Fatalf("ToWorker actors = %v", w.Actors)
+	}
+	// No resources reported: the fields stay empty.
+	w = ToWorker(&ateapipb.Worker{Metadata: &ateapipb.ResourceMetadata{Name: "w-2"}}, nil)
+	if w.CapacityCPU != "" || w.AllocatedMemory != "" {
+		t.Fatalf("ToWorker without resources = %+v", w)
+	}
+}

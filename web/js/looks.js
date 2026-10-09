@@ -17,11 +17,13 @@
 // parameter (?router=portal|lighthouse|core|tower, ?agents=orb|spark|meeple|
 // droid|box) and is remembered in localStorage. ?extras=0 turns off the
 // agents' idle rings, light pools and particles (also remembered; key x).
+// ?group=worker groups agents by worker instead of atespace (remembered; key g).
 
 import { ROUTERS, DEFAULT_ROUTER, routerId } from './routers.js';
 import { SHAPES, DEFAULT_SHAPE, shapeById } from './shapes.js';
+import { groupId } from './workers.js';
 
-const STORE = { router: 'substrate-scope:router', agents: 'substrate-scope:agents', extras: 'substrate-scope:extras' };
+const STORE = { router: 'substrate-scope:router', agents: 'substrate-scope:agents', extras: 'substrate-scope:extras', group: 'substrate-scope:group' };
 
 function stored(key) {
   try {
@@ -46,7 +48,16 @@ export function initialLooks(search = window.location.search) {
   const agents = shapeById(params.get('agents') || stored(STORE.agents) || DEFAULT_SHAPE).id;
   const ex = params.get('extras') ?? stored(STORE.extras);
   const extras = !(ex === '0' || ex === 'off' || ex === 'false');
-  return { router, agents, extras };
+  const group = groupId(params.get('group') || stored(STORE.group));
+  return { router, agents, extras, group };
+}
+
+/** Remembers the grouping (localStorage and the URL). */
+export function rememberGroup(mode) {
+  store(STORE.group, mode);
+  const url = new URL(window.location.href);
+  url.searchParams.set('group', mode);
+  history.replaceState(null, '', url);
 }
 
 export class LookPicker {

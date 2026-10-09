@@ -721,6 +721,61 @@ body.feed-collapsed .feed-tab {
   border-color: var(--accent);
 }
 
+/* Group: atespace | worker */
+.seg {
+  display: inline-flex;
+  align-items: center;
+  background: var(--glass);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.seg-k {
+  padding: 0 6px 0 9px;
+  color: var(--muted);
+}
+
+.seg button {
+  background: none;
+  border: none;
+  border-left: 1px solid var(--line);
+  color: var(--text-2);
+  font: inherit;
+  padding: 6px 9px;
+  cursor: pointer;
+}
+
+.seg button:hover {
+  background: var(--chip-hover);
+}
+
+.seg button[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+/* "show worker" in the panel's Worker row. */
+.linkbtn {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  margin-left: 4px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.linkbtn:hover {
+  color: var(--text);
+}
+
 .dot {
   display: inline-block;
   width: 8px;
@@ -785,6 +840,51 @@ body.feed-collapsed .feed-tab {
 
 .district-label .chip.transition {
   --c: var(--transition);
+}
+
+.district-label .chip.suspended {
+  --c: var(--suspended);
+}
+
+.district-label .chip.pending::before {
+  background: none;
+  border: 1.5px solid var(--pending);
+  width: 5px;
+  height: 5px;
+}
+
+/* Worker view: atespace chips match the agents' floor tints. */
+.district-label .chip.team::before {
+  border-radius: 50%;
+}
+
+.district-label .node {
+  font-family: var(--mono);
+}
+
+.district-label.parked .name {
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.district-label.focused {
+  border-color: var(--sel-border);
+}
+
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  vertical-align: 1px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: var(--text);
+  font-family: var(--font);
 }
 
 .district-label .chip.crashed::before {
@@ -871,6 +971,77 @@ body.feed-collapsed .feed-tab {
 .worker-label .name {
   font-family: var(--mono);
   color: var(--text-2);
+}
+
+.worker-label.focused .name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* The focused worker's card: name, node, agents, slots/CPU/memory fill. */
+.worker-label.card {
+  text-align: left;
+  min-width: 190px;
+  padding: 7px 10px 8px;
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--glass-strong);
+  border: 1px solid var(--sel-border);
+  border-radius: 9px;
+  box-shadow: var(--shadow);
+  text-shadow: none;
+  /* Over every other label (CSS2DRenderer sets z-index inline by depth). */
+  z-index: 100000 !important;
+}
+
+.worker-label.card .name {
+  font-size: 13px;
+}
+
+.worker-label.card .node {
+  font-family: var(--mono);
+  color: var(--muted);
+}
+
+.worker-label.card .meta {
+  margin: 2px 0 4px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.worker-label .use {
+  display: grid;
+  grid-template-columns: 50px 70px auto;
+  gap: 6px;
+  align-items: center;
+  margin-top: 3px;
+}
+
+.worker-label .use .k {
+  color: var(--muted);
+}
+
+.worker-label .use .v {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.worker-label .use .bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--chip-bg);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.worker-label .use .bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.worker-label .use .bar.full i {
+  background: var(--warn-border);
 }
 
 .tower-label {
@@ -1284,16 +1455,25 @@ table.conds .msg {
   }
 
   input[type="search"] {
-    width: 100px;
+    width: 82px;
   }
 
   .legend {
-    gap: 4px;
+    gap: 3px;
   }
 
   .legend .chip {
-    padding: 4px 8px;
+    padding: 4px 6px;
     gap: 5px;
+    font-size: 11px;
+  }
+
+  #topbar {
+    gap: 10px;
+  }
+
+  .brand {
+    gap: 8px;
   }
 
   /* The LED alone says live or not; the word comes back on wide screens. */
@@ -1302,11 +1482,32 @@ table.conds .msg {
   }
 
   #atespace {
-    max-width: 128px;
+    max-width: 106px;
   }
 
   .filters {
-    gap: 6px;
+    gap: 5px;
+  }
+
+  /* The toggle's own words say what it groups; its title says the rest. */
+  .seg-k {
+    display: none;
+  }
+
+  .seg button {
+    padding: 6px 6px;
+  }
+
+  .seg button:first-of-type {
+    border-left: none;
+  }
+
+  select.look-pick {
+    max-width: 84px;
+  }
+
+  .labels-btn {
+    padding: 6px 8px;
   }
 }
 
