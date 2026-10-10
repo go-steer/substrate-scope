@@ -15,6 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { apiBase, mastWebURL, sessionLine, emptySessionsNote, attachError } from './sessions.js';
+import * as S from './sessions.js';
 
 test('paths are relative and escaped', () => {
   assert.equal(apiBase('cred-test/lookout-1'), 'api/agents/cred-test/lookout-1');
@@ -39,4 +40,16 @@ test('attachError recognises the wake refusal', () => {
   assert.equal(e.suspended, true);
   assert.match(e.text, /suspended now/);
   assert.deepEqual(attachError(502, 'attach proxy: boom'), { suspended: false, text: '502: attach proxy: boom' });
+});
+
+// A cold wake can outlast the router's wait (504 after ~10 s on a default
+// Substrate v0.4 router) while the resume carries on, so Wake retries gateway
+// and network errors with a growing delay, and stops on anything else.
+test('wake retries gateway and network errors, not other failures', () => {
+  assert.equal(S.wakeRetryDelay(504, 1), 1000);
+  assert.equal(S.wakeRetryDelay(503, 2), 2000);
+  assert.equal(S.wakeRetryDelay(502, 3), 3000);
+  assert.equal(S.wakeRetryDelay(0, 9), 5000, 'network error; delay capped at 5 s');
+  for (const status of [401, 403, 404, 409, 500]) assert.equal(S.wakeRetryDelay(status, 1), null, `HTTP ${status} is final`);
+  assert.ok(S.WAKE_RETRY_MS >= 30000, 'long enough for a cold resume');
 });

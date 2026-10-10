@@ -69,3 +69,17 @@ export function attachError(status, text) {
   }
   return { suspended: false, text: `${status}: ${String(msg).slice(0, 300)}` };
 }
+
+/** How long a wake keeps retrying. */
+export const WAKE_RETRY_MS = 60000;
+
+/**
+ * Milliseconds to wait before retrying a wake request that got HTTP status
+ * (0 = network error), or null if it shouldn't be retried. Gateway errors
+ * (502/503/504) and network errors mean the router stopped waiting while the
+ * resume may still be running; anything else (401, 409, …) is final.
+ */
+export function wakeRetryDelay(status, attempt) {
+  if (status !== 0 && status !== 502 && status !== 503 && status !== 504) return null;
+  return Math.min(1000 * attempt, 5000);
+}
