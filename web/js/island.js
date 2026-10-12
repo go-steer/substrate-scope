@@ -20,7 +20,7 @@
 // the browser), so node tests can build ground without a DOM.
 
 import * as THREE from 'three';
-import { slotPosition } from './layout.js';
+import { slotPosition, labelAnchor } from './layout.js';
 
 export function hashString(s) {
   let h = 2166136261;
@@ -271,8 +271,9 @@ export function buildGround(group, plan, theme, opts) {
     if (d.kind === 'worker' && platforms > MAX_PLATFORM_LABELS) continue;
     const label = opts.makeLabel('district-label');
     label.element.classList?.add(d.kind);
-    label.position.set(d.x + 0.4, 0.2, d.z + (d.strip ?? 2) / 2);
-    label.center?.set(0, 0.5);
+    const at = labelAnchor(d);
+    label.position.set(at.x, 0.2, at.z);
+    label.center?.set(0, 1);
     group.add(label);
     d.label = label.element;
   }

@@ -26,6 +26,17 @@ export const LABEL_STRIP = 2.0;
 export const GAP = 0.8;
 
 /**
+ * Where a district's label is pinned (x, z in world units): its bottom-left
+ * corner, at the front of the label strip just behind the first row. Labels
+ * are sized in pixels, so zoomed out one is far deeper than the strip; pinned
+ * by its bottom it grows back over the strip and the gap, not over the
+ * agents (rows fill from the strip forward).
+ */
+export function labelAnchor(district) {
+  return { x: district.x + 0.4, z: district.z + (district.strip ?? LABEL_STRIP) - 0.15 };
+}
+
+/**
  * Squarified treemap (Bruls, Huizing, van Wijk). Lays out items with a
  * positive weight inside rect so each gets area proportional to its weight
  * with aspect ratios close to 1.

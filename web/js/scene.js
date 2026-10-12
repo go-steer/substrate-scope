@@ -43,7 +43,7 @@ import { CLASSES, stateClass } from './model.js';
 import { AgentLayers } from './agents.js';
 import { shapeById } from './shapes.js';
 import { buildRouter, routerId } from './routers.js';
-import { planIsland, slotPosition, slotAt, SlotTable, CELL } from './layout.js';
+import { planIsland, slotPosition, slotAt, SlotTable, CELL, labelAnchor } from './layout.js';
 import { esc, duration, since, workerLabel, compact } from './format.js';
 import { Effects } from './effects.js';
 import { themeById, classColor, hex } from './themes.js';
@@ -421,7 +421,7 @@ export class Scene {
     for (let i = 0; i < PLATFORM_LABELS; i++) {
       const l = makeLabel('district-label');
       l.element.classList.add('worker');
-      l.center.set(0, 0.5);
+      l.center.set(0, 1);
       l.visible = false;
       this.world.add(l);
       this.platformLabels.push(l);
@@ -1732,11 +1732,11 @@ export class Scene {
   districtLabelEls() {
     const out = [];
     if (!this.plan) return out;
-    for (const d of this.plan.districts.values()) if (d.label) out.push({ el: d.label, x0: d.x, x1: d.x + d.w, z: d.z + d.d / 2, ax: d.x + 0.4, az: d.z + (d.strip ?? 2) / 2, area: d.w * d.d });
+    for (const d of this.plan.districts.values()) if (d.label) out.push({ el: d.label, x0: d.x, x1: d.x + d.w, z: d.z + d.d / 2, ax: labelAnchor(d).x, az: labelAnchor(d).z, bottom: true, area: d.w * d.d });
     for (const f of [...(this.plan.frames || []), ...(this.plan.padFrames || [])]) if (f.label) out.push({ el: f.label, x0: f.x, x1: f.x + f.w, z: f.z + f.d / 2, ax: f.x + 0.5, az: f.z + (f.strip ?? 2) / 2, area: f.w * f.d * 4 });
     for (const l of this.platformLabels) {
       const d = l.visible && l.userData.d;
-      if (d) out.push({ el: l.element, x0: d.x, x1: d.x + d.w, z: d.z, ax: d.x + 0.4, az: d.z + (d.strip ?? 2) / 2, area: 1 });
+      if (d) out.push({ el: l.element, x0: d.x, x1: d.x + d.w, z: d.z, ax: labelAnchor(d).x, az: labelAnchor(d).z, bottom: true, area: 1 });
     }
     return out;
   }
@@ -1807,7 +1807,9 @@ export class Scene {
       a.set(d.ax, y + 0.2, d.az).project(this.camera);
       const sx = (a.x * 0.5 + 0.5) * W;
       const sy = (-a.y * 0.5 + 0.5) * H;
-      const box = { x0: sx - 4, x1: sx + w + 4, y0: sy - h / 2 - 2, y1: sy + h / 2 + 2 };
+      // District labels hang above their anchor (bottom: true); the rest center on it.
+      const cy = d.bottom ? 1 : 0.5;
+      const box = { x0: sx - 4, x1: sx + w + 4, y0: sy - h * cy - 2, y1: sy + h * (1 - cy) + 2 };
       const off = a.z > 1 || box.x1 < 0 || box.x0 > W || box.y1 < 0 || box.y0 > H;
       const hit = placed.some((q) => box.x0 < q.x1 && box.x1 > q.x0 && box.y0 < q.y1 && box.y1 > q.y0);
       cl.toggle('crowded', hit);
@@ -1932,7 +1934,8 @@ export class Scene {
       }
       l.visible = true;
       l.userData.d = c.d;
-      l.position.set(c.d.x + 0.4, 0.2, c.d.z + (c.d.strip ?? 2) / 2);
+      const at = labelAnchor(c.d);
+      l.position.set(at.x, 0.2, at.z);
       this.fillPlatformLabel(l, c.d);
     });
   }
