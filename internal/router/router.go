@@ -135,6 +135,11 @@ func (c *Client) AttachProxy(token TokenSource, target func(*http.Request) (acto
 			pr.Out.URL.RawQuery = q.Encode()
 			pr.Out.Host = base.Host
 			pr.Out.Header.Del("Cookie")
+			// The collector is the client here, not the browser: mast's
+			// attach API refuses a browser Origin that isn't its own
+			// listener, and the collector has already checked it (attach).
+			pr.Out.Header.Del("Origin")
+			pr.Out.Header.Del("Referer")
 			pr.Out.Header.Del("Authorization")
 			pr.Out.Header.Del("X-Scope-Wake")
 			pr.Out.Header.Set(TargetHeader, actor)

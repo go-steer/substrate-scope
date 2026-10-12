@@ -29,6 +29,8 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -333,6 +335,10 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if !s.sameOrigin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin request refused: " + r.Header.Get("Origin")})
+		return
+	}
 	if strings.Contains(rest, "..") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad path"})
 		return
@@ -340,4 +346,34 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 	s.o.Attach.AttachProxy(s.o.AttachToken, func(*http.Request) (string, string) {
 		return model.Key(as, name), "/" + rest
 	}).ServeHTTP(w, r)
+}
+
+// sameOrigin is the attach proxy's CSRF check. The proxy drops the browser's
+// Origin before the request reaches mast (whose attach API would refuse it),
+// so the collector vouches for the request instead: a request that can change
+// something must come from this host or an allowed one (AllowedOrigins, the
+// same patterns the event stream accepts). Reads, and clients that send no
+// Origin at all, pass.
+func (s *Server) sameOrigin(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	o := r.Header.Get("Origin")
+	if o == "" {
+		return true
+	}
+	u, err := url.Parse(o)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+	for _, p := range s.o.AllowedOrigins {
+		if ok, _ := path.Match(strings.ToLower(p), strings.ToLower(u.Host)); ok {
+			return true
+		}
+	}
+	return false
 }
