@@ -83,6 +83,11 @@ type rig struct {
 
 func newRig(t *testing.T) *rig {
 	t.Helper()
+	return newRigWithOrigins(t, nil)
+}
+
+func newRigWithOrigins(t *testing.T, origins []string) *rig {
+	t.Helper()
 	store := collector.NewStore(collector.Options{Cluster: "test", Source: "test"})
 	store.Update(collector.Update{Actors: map[string][]model.Agent{"cred-test": {
 		{Atespace: "cred-test", Name: "run", State: model.StateRunning},
@@ -94,12 +99,13 @@ func newRig(t *testing.T) *rig {
 	fa := &fakeActors{states: map[string]string{"cred-test/run": model.StateRunning, "cred-test/sleep": model.StateSuspended}}
 	rc := &router.Client{Addr: rs.URL}
 	s := New(Options{
-		Store:       store,
-		Web:         fstest.MapFS{"index.html": {Data: []byte("<!doctype html>scope")}},
-		Actors:      fa,
-		Runner:      rc,
-		Attach:      rc,
-		AttachToken: router.StaticToken("agent-token"),
+		Store:          store,
+		Web:            fstest.MapFS{"index.html": {Data: []byte("<!doctype html>scope")}},
+		Actors:         fa,
+		Runner:         rc,
+		Attach:         rc,
+		AttachToken:    router.StaticToken("agent-token"),
+		AllowedOrigins: origins,
 		MastWeb: fstest.MapFS{
 			"index.html":       {Data: []byte("<!doctype html>mast-web index")},
 			"solo.html":        {Data: []byte("<!doctype html>mast-web solo")},
@@ -219,6 +225,54 @@ func TestAttachProxiesWithRoutingHeaderAndToken(t *testing.T) {
 	}
 	if got.Header.Get(router.TargetHeader) != "cred-test/run" || got.Header.Get("Authorization") != "Bearer agent-token" || got.Header.Get("Cookie") != "" {
 		t.Fatalf("forwarded headers %v", got.Header)
+	}
+}
+
+// postAttach sends a POST through the attach proxy with the given Origin.
+func postAttach(t *testing.T, r *rig, origin string) int {
+	t.Helper()
+	req, _ := http.NewRequest("POST", r.srv.URL+"/api/agents/cred-test/run/attach/sessions", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	req.Header.Set("Referer", r.srv.URL+"/mast-web/a/cred-test/run/")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+func TestAttachForwardsSameOriginWritesWithoutOrigin(t *testing.T) {
+	r := newRig(t)
+	if code := postAttach(t, r, r.srv.URL); code != 200 {
+		t.Fatalf("same-origin POST: code %d", code)
+	}
+	got := r.router.requests[0]
+	if got.Method != "POST" || got.Header.Get("Origin") != "" || got.Header.Get("Referer") != "" {
+		t.Fatalf("forwarded %s with Origin %q, Referer %q; want both dropped", got.Method, got.Header.Get("Origin"), got.Header.Get("Referer"))
+	}
+}
+
+func TestAttachRefusesCrossOriginWrites(t *testing.T) {
+	r := newRig(t)
+	if code := postAttach(t, r, "https://evil.example"); code != http.StatusForbidden {
+		t.Fatalf("cross-origin POST: code %d, want 403", code)
+	}
+	if r.router.count() != 0 {
+		t.Fatalf("a refused request reached the router (%d requests)", r.router.count())
+	}
+}
+
+func TestAttachAcceptsAllowedOriginWrites(t *testing.T) {
+	r := newRigWithOrigins(t, []string{"*.cloudworkstations.dev"})
+	if code := postAttach(t, r, "https://8080-ws.cluster-x.cloudworkstations.dev"); code != 200 {
+		t.Fatalf("allowed-origin POST: code %d", code)
+	}
+	if code := postAttach(t, r, "https://other.example"); code != http.StatusForbidden {
+		t.Fatalf("unlisted origin: code %d, want 403", code)
 	}
 }
 
