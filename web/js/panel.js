@@ -25,7 +25,7 @@
 import { esc, duration, since, parseGoDuration, workerLabel, clock } from './format.js';
 import { cssColor } from './scene.js';
 import { stateClass } from './model.js';
-import { apiBase, mastWebURL, sessionLine, emptySessionsNote, attachError } from './sessions.js';
+import { apiBase, mastWebURL, sessionLine, emptySessionsNote, attachError, wakeRetryDelay, WAKE_RETRY_MS } from './sessions.js';
 
 const REASON_CLASS = {
   IdleSuspended: 'r-idle',
@@ -246,6 +246,10 @@ export class Panel {
           ? `${esc(workerLabel(d.worker) || a.workerPod || a.worker)}${a.workerNode ? `<span class="muted"> on ${esc(a.workerNode)}</span>` : ''}${this.opts.onShowWorker ? ` <button class="linkbtn" data-act="show-worker" data-worker="${esc(a.worker)}" title="Light up this worker and the agents on it">show worker</button>` : ''}`
           : '<span class="muted">none</span>',
       ),
+      a.worker && a.workerIPs?.length ? row('Worker IP', a.workerIPs.map((ip) => mono(ip)).join(' ')) : '',
+      // Substrate v0.4: a PAUSED actor has no worker but stays attached to
+      // the node holding its local snapshot.
+      !a.worker && a.assignedNode ? row('Node', `${esc(a.assignedNode)}<span class="muted"> (holds its local snapshot)</span>`) : '',
       row('Template', a.template && mono(a.template)),
       row('Snapshot', a.snapshotURI ? mono(a.snapshotURI.replace(/^gs:\/\/[^/]+\//, '…/')) : '<span class="muted">none yet</span>'),
       a.snapshotInProgress ? row('Snapshot', '<span class="busy">in progress</span>') : '',
@@ -318,7 +322,9 @@ export class Panel {
         on a worker. It stays awake while a mast-web session is open, and suspends again once it has been idle for its idle policy.</div>
         <button class="btn warn" data-act="wake-yes">Yes, wake it</button> <button class="btn ghost" data-act="wake-no">Cancel</button>`;
     } else if (this.wake === 'waking') {
-      body += `<p class="progress">Waking: sent one session-list request through the router…</p>`;
+      body += this.wakeAttempt > 1
+        ? `<p class="progress">Still waking (attempt ${this.wakeAttempt}): the router gave up waiting, but the resume carries on, so asking again…</p>`
+        : `<p class="progress">Waking: sent a session-list request through the router…</p>`;
     } else if (this.wake === 'waiting') {
       body += `<p class="progress">Woken. Waiting for Agent Substrate to report RUNNING (it says ${esc(a.state.toLowerCase())})…</p>`;
     } else {
@@ -354,28 +360,51 @@ export class Panel {
     return head + body;
   }
 
-  /** Lists sessions; wake=true sends the wake consent with the request. */
+  /** Lists sessions; wake=true sends the wake consent with the request, and retries while the wake is in progress. */
   async listSessions(wake) {
     const key = this.key;
     if (this.sessionsLoading) return;
     this.sessionsLoading = true;
     this.sessionError = '';
+    this.wakeAttempt = 0;
     this.renderSessions();
     let ok = false;
+    const deadline = Date.now() + WAKE_RETRY_MS;
     try {
-      const resp = await fetch(`${apiBase(key)}/attach/sessions${wake ? '?scope_wake=1' : ''}`, { cache: 'no-store' });
-      const text = await resp.text();
-      if (key !== this.key) return;
-      if (!resp.ok) {
-        const e = attachError(resp.status, text);
-        this.sessionError = e.text;
-        if (e.suspended) this.load();
-      } else {
-        this.sessions = JSON.parse(text).sessions || [];
-        ok = true;
+      for (let attempt = 1; ; attempt++) {
+        if (wake) {
+          this.wakeAttempt = attempt;
+          this.renderSessions();
+        }
+        let status = 0;
+        let text = '';
+        try {
+          const resp = await fetch(`${apiBase(key)}/attach/sessions${wake ? '?scope_wake=1' : ''}`, { cache: 'no-store' });
+          status = resp.status;
+          text = await resp.text();
+        } catch (err) {
+          text = String(err);
+        }
+        if (key !== this.key) return;
+        if (status >= 200 && status < 300) {
+          this.sessions = JSON.parse(text).sessions || [];
+          this.sessionError = '';
+          ok = true;
+          break;
+        }
+        // A cold wake can outlast the router's wait (504 after ~10 s on a
+        // default Substrate v0.4 router) while the resume itself carries on,
+        // so a wake keeps asking until the agent answers or time runs out.
+        const delay = wake ? wakeRetryDelay(status, attempt) : null;
+        if (delay === null || Date.now() + delay > deadline) {
+          const e = status ? attachError(status, text) : { text, suspended: false };
+          this.sessionError = e.text;
+          if (e.suspended) this.load();
+          break;
+        }
+        await new Promise((r) => setTimeout(r, delay));
+        if (key !== this.key) return;
       }
-    } catch (err) {
-      if (key === this.key) this.sessionError = String(err);
     } finally {
       if (key === this.key) {
         this.sessionsLoading = false;

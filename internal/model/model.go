@@ -57,6 +57,17 @@ type Agent struct {
 	WorkerPod  string `json:"workerPod,omitempty"`
 	WorkerNode string `json:"workerNode,omitempty"`
 	WorkerPool string `json:"workerPool,omitempty"`
+	// WorkerIPs are the hosting worker pod's IPs (at most one per family,
+	// primary family first). WorkerIP is the first non-empty one.
+	WorkerIPs []string `json:"workerIPs,omitempty"`
+	WorkerIP  string   `json:"workerIP,omitempty"`
+	// WorkerEpoch is the worker's epoch when the actor was placed on it; 0
+	// when the worker had not reported one.
+	WorkerEpoch int64 `json:"workerEpoch,omitempty"`
+	// AssignedNode is the node the actor is attached to: the one hosting its
+	// worker, or holding its node-local snapshot while PAUSED. Empty when
+	// detached.
+	AssignedNode string `json:"assignedNode,omitempty"`
 	// SnapshotURI is the actor's current external snapshot, if any.
 	SnapshotURI string `json:"snapshotURI,omitempty"`
 	// SnapshotInProgress is set while the actor is taking a snapshot.
@@ -132,6 +143,14 @@ type Worker struct {
 	Node         string `json:"node,omitempty"`
 	SandboxClass string `json:"sandboxClass,omitempty"`
 	State        string `json:"state"`
+	// IPs are the worker pod's IPs, at most one per family, primary first.
+	IPs []string `json:"ips,omitempty"`
+	// Epoch counts the runs of the worker's ateom (0: not reported).
+	// ObservedEpoch trails it until the control plane has crashed the
+	// actors placed before the last restart; while it is lower, some of
+	// the worker's actors may be reported running but are gone.
+	Epoch         int64 `json:"epoch,omitempty"`
+	ObservedEpoch int64 `json:"observedEpoch,omitempty"`
 	// CapacityActors and AllocatedActors are the worker's actor slots.
 	CapacityActors  int32 `json:"capacityActors"`
 	AllocatedActors int32 `json:"allocatedActors"`

@@ -39,7 +39,7 @@ func readOnly(method string) bool {
 // mutatingRPCs returns every non-read RPC of the given services, taken from
 // the proto descriptors so a new mutating RPC upstream is covered
 // automatically (CreateActor, SuspendActor, ResumeActor, DrainWorker,
-// MintActorJWT, SuspendTask, ...).
+// MintActorJWT, SuspendTask, Create/Update/DeleteAtespaceAccessPolicy, ...).
 func mutatingRPCs(t *testing.T) map[string]string {
 	t.Helper()
 	out := map[string]string{}
@@ -58,7 +58,14 @@ func mutatingRPCs(t *testing.T) map[string]string {
 	}
 	add(ateapipb.File_ateapi_proto)
 	add(axapi.File_ax_proto)
-	for _, must := range []string{"SuspendActor", "ResumeActor", "DeleteActor", "CreateActor", "PauseActor", "RevertActor", "DrainWorker", "SuspendTask", "ResumeTask"} {
+	for _, must := range []string{
+		"SuspendActor", "ResumeActor", "DeleteActor", "CreateActor", "PauseActor", "RevertActor", "DrainWorker", "SuspendTask", "ResumeTask",
+		// Substrate v0.4: access policy writes (the collector must never
+		// grant itself or anyone else access) and the worker-only service.
+		"CreateGlobalAccessPolicy", "UpdateGlobalAccessPolicy",
+		"CreateAtespaceAccessPolicy", "UpdateAtespaceAccessPolicy", "DeleteAtespaceAccessPolicy",
+		"RegisterWorker", "MintAteomActorCertificate", "RequestActorSuspend",
+	} {
 		if _, ok := out[must]; !ok {
 			t.Fatalf("descriptor scan missed %s; the test is broken", must)
 		}
@@ -149,5 +156,21 @@ func TestReadAPIIsReadOnly(t *testing.T) {
 	}
 	if !typ.Implements(typ) || !reflect.TypeFor[ateapipb.ControlClient]().Implements(typ) {
 		t.Fatal("ateapipb.ControlClient no longer satisfies readAPI")
+	}
+}
+
+// TestReadAPIExactSet pins the RPCs the collector calls. Growing it is a
+// deliberate change: a new call may need a wider grant when Substrate runs
+// with authorization enabled (see "Authorization" in docs/design.md).
+func TestReadAPIExactSet(t *testing.T) {
+	want := []string{"GetActor", "ListActors", "ListAtespaces", "ListWorkerActorAssignments", "ListWorkers"}
+	typ := reflect.TypeFor[readAPI]()
+	var got []string
+	for i := 0; i < typ.NumMethod(); i++ {
+		got = append(got, typ.Method(i).Name)
+	}
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("readAPI methods = %v, want %v", got, want)
 	}
 }

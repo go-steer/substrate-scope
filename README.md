@@ -35,7 +35,9 @@ Rendered with three.js, GPU instancing and semantic zoom (district heat tiles fa
 
 ## Quickstart (in a cluster)
 
-The collector runs as its own service account in namespace `substrate-scope`. It authenticates to Substrate's control API with a projected token for audience `api.ate-system.svc` and trusts the servicedns CA bundle, the same way ax-server does.
+Requires Agent Substrate **v0.4.0** (the collector is built against it). The collector runs as its own service account in namespace `substrate-scope`. It authenticates to Substrate's control API with a projected token for audience `api.ate-system.svc` and trusts the servicedns CA bundle, the same way ax-server does.
+
+If Substrate's API server runs with authorization enforced (`--experimental-enable-authz`), grant the collector the **global viewer** role: an entry `user:system:serviceaccount:substrate-scope:substrate-scope` under role `viewer` in the global access policy, created or updated by one of the `--authz-bootstrap-owners`. Without it, listing atespaces and actors fails with PermissionDenied. See [Authorization](docs/design.md#authorization) for which calls are checked and a grpcurl example.
 
 ```sh
 kubectl apply -f deploy/substrate-scope.yaml
@@ -58,7 +60,7 @@ Flags (see `substrate-scope -h`): `--cluster` (name on the island), `--substrate
 
 Looking must not change what you look at, so the collector:
 
-- calls only Substrate's list and get RPCs and ax's `ListTasks`, which are answered from those services' own stores and never reach an actor. A test (`internal/substrate/nevermutate_test.go`) fails if any code refers to a mutating Substrate or ax RPC;
+- calls only Substrate's list and get RPCs and ax's `ListTasks`, which are answered from those services' own stores and never reach an actor. A test (`internal/substrate/nevermutate_test.go`) fails if any code refers to a mutating Substrate or ax RPC (including v0.4's access policy writes, so the collector can never grant itself access);
 - reads an ax runner's status (`/metadata/v1alpha1/ax/status`, through the router) only for the agent selected in the UI, only if Substrate reports it `RUNNING`, and re-checks that with `GetActor` right before, because the router resumes a suspended actor to deliver any request;
 - refuses attach requests to an agent that isn't running unless the request says it may wake it (`scope_wake=1`). The UI asks first and says so.
 
@@ -87,7 +89,7 @@ make push deploy   # build, push to IMAGE, pin the digest in deploy/, apply
 
 The front end is plain ES modules in `web/` with a vendored three.js build (`web/vendor/three/`, see its README); there is no bundler. `node hack/screens.mjs --url ... --out DIR` takes screenshots with headless Chromium (WebGL on SwiftShader).
 
-The ax API stubs in `internal/axapi` are generated from a pinned copy of ax.proto from the fork that adds idle suspension and task conditions; `make generate` regenerates them.
+The ax API stubs in `internal/axapi` are generated from a pinned copy of ax.proto from the fork that adds idle suspension and task conditions; `make generate` regenerates them. The pinned copy predates the fork's Substrate v0.4 port (branch `substrate-v0.4`); refresh it from there once that lands.
 
 ## Layout
 

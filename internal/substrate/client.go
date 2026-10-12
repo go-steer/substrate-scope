@@ -31,8 +31,10 @@ import (
 
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 // DefaultPageSize is the page size for list calls.
@@ -140,6 +142,17 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
+// explain adds what to do to a PermissionDenied error. Substrate v0.4 checks
+// ListAtespaces, ListActors and GetActor when its API server runs with
+// --experimental-enable-authz; the collector then needs the global viewer
+// role.
+func explain(err error) error {
+	if status.Code(err) == codes.PermissionDenied {
+		return fmt.Errorf("%w (Substrate enforces authorization: grant the collector's service account the global viewer role, see \"Authorization\" in docs/design.md)", err)
+	}
+	return err
+}
+
 // maxPages bounds a list loop in case a server keeps returning a token.
 const maxPages = 10000
 
@@ -170,7 +183,7 @@ func (c *Client) ListAtespaces(ctx context.Context) ([]*ateapipb.Atespace, error
 	err := paginate(func(token string) (string, error) {
 		resp, err := c.api.ListAtespaces(ctx, &ateapipb.ListAtespacesRequest{PageSize: c.PageSize, PageToken: token})
 		if err != nil {
-			return "", fmt.Errorf("listing atespaces: %w", err)
+			return "", fmt.Errorf("listing atespaces: %w", explain(err))
 		}
 		out = append(out, resp.GetAtespaces()...)
 		return resp.GetNextPageToken(), nil
@@ -184,7 +197,7 @@ func (c *Client) ListActors(ctx context.Context, atespace string) ([]*ateapipb.A
 	err := paginate(func(token string) (string, error) {
 		resp, err := c.api.ListActors(ctx, &ateapipb.ListActorsRequest{Atespace: atespace, PageSize: c.PageSize, PageToken: token})
 		if err != nil {
-			return "", fmt.Errorf("listing actors in %s: %w", atespace, err)
+			return "", fmt.Errorf("listing actors in %s: %w", atespace, explain(err))
 		}
 		out = append(out, resp.GetActors()...)
 		return resp.GetNextPageToken(), nil
@@ -197,7 +210,7 @@ func (c *Client) ListActors(ctx context.Context, atespace string) ([]*ateapipb.A
 func (c *Client) GetActor(ctx context.Context, atespace, name string) (*ateapipb.Actor, error) {
 	a, err := c.api.GetActor(ctx, &ateapipb.GetActorRequest{Actor: &ateapipb.ObjectRef{Atespace: atespace, Name: name}})
 	if err != nil {
-		return nil, fmt.Errorf("getting actor %s/%s: %w", atespace, name, err)
+		return nil, fmt.Errorf("getting actor %s/%s: %w", atespace, name, explain(err))
 	}
 	return a, nil
 }
@@ -208,7 +221,7 @@ func (c *Client) ListWorkers(ctx context.Context) ([]*ateapipb.Worker, error) {
 	err := paginate(func(token string) (string, error) {
 		resp, err := c.api.ListWorkers(ctx, &ateapipb.ListWorkersRequest{PageSize: c.PageSize, PageToken: token})
 		if err != nil {
-			return "", fmt.Errorf("listing workers: %w", err)
+			return "", fmt.Errorf("listing workers: %w", explain(err))
 		}
 		out = append(out, resp.GetWorkers()...)
 		return resp.GetNextPageToken(), nil
@@ -224,7 +237,7 @@ func (c *Client) ListWorkerActorAssignments(ctx context.Context, worker string) 
 			Worker: &ateapipb.ObjectRef{Name: worker}, PageSize: c.PageSize, PageToken: token,
 		})
 		if err != nil {
-			return "", fmt.Errorf("listing assignments of worker %s: %w", worker, err)
+			return "", fmt.Errorf("listing assignments of worker %s: %w", worker, explain(err))
 		}
 		out = append(out, resp.GetActorAssignments()...)
 		return resp.GetNextPageToken(), nil
