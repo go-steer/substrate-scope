@@ -11,6 +11,7 @@ from the package to upgrade.
 | `addons/postprocessing/*.js` | `examples/jsm/postprocessing/` |
 | `addons/shaders/*.js` | `examples/jsm/shaders/` |
 | `addons/renderers/CSS2DRenderer.js` | `examples/jsm/renderers/` |
+| `addons/lines/{Line2,LineSegments2,LineGeometry,LineSegmentsGeometry,LineMaterial}.js` | `examples/jsm/lines/` |
 
 `web/index.html` maps `three` and `three/addons/` to this directory with an
 import map, so the front end needs no bundler.
