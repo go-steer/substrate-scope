@@ -60,13 +60,43 @@ jobs:
       - name: unit tests
         run: node --test web/js/*.test.js
 
+  # Builds the image on every PR; on main it also pushes it, tagged with the
+  # commit, to the ax registry. GitHub's OIDC token is exchanged for the
+  # substrate-scope-image service account through the github-actions pool's
+  # substrate-scope-image provider, which only accepts this repo's main.
   image:
-    name: image (build only)
+    name: image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      IMAGE: us-central1-docker.pkg.dev/gke-demos-345619/ax/substrate-scope
+      PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - id: auth
+        if: env.PUSH == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/1067056737933/locations/global/workloadIdentityPools/github-actions/providers/substrate-scope-image
+          service_account: substrate-scope-image@gke-demos-345619.iam.gserviceaccount.com
+          token_format: access_token
+      - if: env.PUSH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: us-central1-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+      - id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
-          push: false
+          push: ${{ env.PUSH == 'true' }}
+          tags: ${{ env.IMAGE }}:${{ github.sha }},${{ env.IMAGE }}:main
+      - name: digest
+        if: env.PUSH == 'true'
+        run: |
+          echo "Pushed \`$IMAGE@${{ steps.build.outputs.digest }}\` (\`:${{ github.sha }}\`)." >> "$GITHUB_STEP_SUMMARY"
+          echo "Pin it with: \`sed -i 's#substrate-scope@sha256:[0-9a-f]*#substrate-scope@${{ steps.build.outputs.digest }}#' deploy/substrate-scope.yaml\`" >> "$GITHUB_STEP_SUMMARY"

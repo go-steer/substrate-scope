@@ -85,6 +85,8 @@ make run-local     # run the collector on your machine against $CONTEXT, serving
 make push deploy   # build, push to IMAGE, pin the digest in deploy/, apply
 ```
 
+CI pushes an image for every merge to main, tagged with the commit (`IMAGE:<sha>`, and `IMAGE:main` for the latest); the run's summary has the digest. To release one, pin that digest in `deploy/substrate-scope.yaml` and `make deploy`. `make push` is still there for images built from a local tree.
+
 `dev/run-local` port-forwards Substrate's API server, ax-server and the router, mints a short-lived token for the `substrate-scope` service account and fetches the CA bundle into `.dev/` (git-ignored).
 
 The front end is plain ES modules in `web/` with a vendored three.js build (`web/vendor/three/`, see its README); there is no bundler. `node hack/screens.mjs --url ... --out DIR` takes screenshots with headless Chromium (WebGL on SwiftShader).
