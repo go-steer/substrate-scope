@@ -97,6 +97,8 @@ type Crash struct {
 
 // Task is what ax knows about the task an actor runs.
 type Task struct {
+	// Name is the task's own name (metadata.name); its actor's name can differ.
+	Name       string      `json:"name,omitempty"`
 	Phase      string      `json:"phase,omitempty"`
 	Image      string      `json:"image,omitempty"`
 	Command    []string    `json:"command,omitempty"`
@@ -201,4 +203,7 @@ type Features struct {
 	// MastWeb is true when the collector serves mast-web for agents (needs
 	// the attach proxy).
 	MastWeb bool `json:"mastWeb"`
+	// Raw is true when the collector serves agents' raw API objects
+	// (redacted) for the panel's YAML view.
+	Raw bool `json:"raw"`
 }

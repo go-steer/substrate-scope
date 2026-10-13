@@ -21,7 +21,7 @@ import { Scene, cssColor } from './scene.js';
 import { Panel } from './panel.js';
 import { esc, duration, since, clock, workerLabel, compact } from './format.js';
 import { describe } from './feed.js';
-import { SyntheticStream, syntheticDetail, syntheticOptions } from './synth.js';
+import { SyntheticStream, syntheticDetail, syntheticRaw, syntheticOptions } from './synth.js';
 import { ThemePicker } from './theming.js';
 import { LookPicker, initialLooks, rememberGroup, rememberLayout, rememberBeams, storedDecks, storeDecks } from './looks.js';
 import { DECK_KEYS, layoutId, beamModeId, scrollModeId } from './decks.js';
@@ -113,6 +113,7 @@ const panel = new Panel($('#panel'), {
   },
   features: () => model.features,
   detail: synthetic > 0 ? (key) => syntheticDetail(model.agents.get(key), model.workers) : undefined,
+  raw: synthetic > 0 ? (key) => syntheticRaw(model.agents.get(key), model.workers) : undefined,
 });
 
 // Themes: switching re-colors the page (CSS variables), the scene, the open

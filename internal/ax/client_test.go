@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/go-steer/substrate-scope/internal/axapi"
 )
@@ -34,6 +36,19 @@ func (f *fakeAX) ListTasks(_ context.Context, in *axapi.ListTasksRequest, _ ...g
 	start := min(int(in.GetOffset()), len(f.tasks))
 	end := min(start+int(in.GetLimit()), len(f.tasks))
 	return &axapi.ListTasksResponse{Tasks: f.tasks[start:end]}, nil
+}
+
+func (f *fakeAX) GetTask(_ context.Context, in *axapi.GetTaskRequest, _ ...grpc.CallOption) (*axapi.Task, error) {
+	for _, t := range f.tasks {
+		if t.GetMetadata().GetAtespace() == in.GetAtespace() && t.GetMetadata().GetName() == in.GetName() {
+			return t, nil
+		}
+	}
+	return nil, status.Error(codes.NotFound, "no such task")
+}
+
+func (f *fakeAX) GetWorkspace(_ context.Context, in *axapi.GetWorkspaceRequest, _ ...grpc.CallOption) (*axapi.Workspace, error) {
+	return &axapi.Workspace{Metadata: &axapi.ObjectMeta{Atespace: in.GetAtespace(), Name: in.GetName()}}, nil
 }
 
 func TestListTasksPaginatesAndKeysByActor(t *testing.T) {

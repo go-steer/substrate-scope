@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // Package ax is a read-only client for the Agent Executor (ax) API. It lists
-// tasks and nothing else; listing reads ax's store and never reaches the
-// task's actor.
+// and gets tasks and gets workspaces, nothing else; those read ax's store and
+// never reach the task's actor.
 package ax
 
 import (
@@ -39,6 +39,8 @@ const maxTasks = 100000
 // readAPI is the subset of axapi.AXClient the collector may use.
 type readAPI interface {
 	ListTasks(ctx context.Context, in *axapi.ListTasksRequest, opts ...grpc.CallOption) (*axapi.ListTasksResponse, error)
+	GetTask(ctx context.Context, in *axapi.GetTaskRequest, opts ...grpc.CallOption) (*axapi.Task, error)
+	GetWorkspace(ctx context.Context, in *axapi.GetWorkspaceRequest, opts ...grpc.CallOption) (*axapi.Workspace, error)
 }
 
 // Client lists ax tasks.
@@ -90,6 +92,24 @@ func (c *Client) ListTasks(ctx context.Context, atespace string) (map[string]mod
 	return out, nil
 }
 
+// GetTask returns one task by its own name (model.Task.Name).
+func (c *Client) GetTask(ctx context.Context, atespace, name string) (*axapi.Task, error) {
+	t, err := c.api.GetTask(ctx, &axapi.GetTaskRequest{Atespace: atespace, Name: name})
+	if err != nil {
+		return nil, fmt.Errorf("getting ax task %s/%s: %w", atespace, name, err)
+	}
+	return t, nil
+}
+
+// GetWorkspace returns one workspace.
+func (c *Client) GetWorkspace(ctx context.Context, atespace, name string) (*axapi.Workspace, error) {
+	w, err := c.api.GetWorkspace(ctx, &axapi.GetWorkspaceRequest{Atespace: atespace, Name: name})
+	if err != nil {
+		return nil, fmt.Errorf("getting ax workspace %s/%s: %w", atespace, name, err)
+	}
+	return w, nil
+}
+
 func ts(t *timestamppb.Timestamp) *time.Time {
 	if t == nil || !t.IsValid() {
 		return nil
@@ -102,6 +122,7 @@ func ts(t *timestamppb.Timestamp) *time.Time {
 func ToTask(t *axapi.Task) model.Task {
 	sp := t.GetSpec()
 	out := model.Task{
+		Name:             t.GetMetadata().GetName(),
 		Phase:            t.GetStatus().GetPhase(),
 		Image:            sp.GetImage(),
 		Command:          sp.GetCommand(),
