@@ -85,7 +85,8 @@ void main() {
   vec2 p = (vUv - 0.5) * uSize;
   vec2 q = uSize * 0.5 - abs(p);
   float e = min(q.x, q.y);
-  float edge = 1.0 - smoothstep(0.0, 0.07, e);
+  // At least ~1.5 px wide on screen, so far pads keep a solid outline.
+  float edge = 1.0 - smoothstep(0.0, max(0.07, 1.5 * fwidth(e)), e);
   float inner = smoothstep(0.18, 0.4, e) * vGlow.a;
   float a = max(inner, edge * vEdge.a);
   if (a < 0.01) discard;
@@ -123,6 +124,11 @@ export class WorkerPads {
         fragmentShader: glowFragment,
         transparent: true,
         depthWrite: false,
+        // Drawn just above the pad's top: pulled forward in depth so it
+        // doesn't fight the top when zoomed out.
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -4,
         uniforms: { uSize: { value: new THREE.Vector2(PAD_W + 0.04, PAD_D + 0.04) } },
       }),
       track: new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.9 }),

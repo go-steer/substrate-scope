@@ -20,6 +20,9 @@
 // the browser), so node tests can build ground without a DOM.
 
 import * as THREE from 'three';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { slotPosition, labelAnchor } from './layout.js';
 
 export function hashString(s) {
@@ -45,6 +48,29 @@ export function roundedRect(w, d, r) {
   s.lineTo(x, y + r);
   s.quadraticCurveTo(x, y, x + r, y);
   return s;
+}
+
+/**
+ * A deck's rim: a closed outline of shape at height y, a constant RIM_PX
+ * wide on screen. WebGL lines are always 1 px, so they read thick or faint
+ * by angle and distance; Line2 draws screen-space quads instead.
+ */
+export const RIM_PX = 2;
+export function rimLine(shape, segments, cx, y, cz, mat) {
+  const pts = shape.getPoints(segments);
+  pts.push(pts[0]);
+  const geo = new LineGeometry().setPositions(pts.flatMap((p) => [p.x + cx, y, p.y + cz]));
+  return new Line2(geo, mat);
+}
+
+// Glowing (additive) rims are dimmed to keep the bloom off the wider line
+// near what it was on the 1 px one; full brightness, it beads where the
+// unantialiased line steps from 2 to 3 px.
+const RIM_GLOW = 0.6;
+export function rimMaterial(color, opacity, blending) {
+  const c = new THREE.Color(color);
+  if (blending === THREE.AdditiveBlending) c.multiplyScalar(RIM_GLOW);
+  return new LineMaterial({ color: c, linewidth: RIM_PX, transparent: opacity < 1, opacity, blending });
 }
 
 /** Removes and disposes everything under group (geometries, materials, textures, labels). */
@@ -168,10 +194,9 @@ export function buildGround(group, plan, theme, opts) {
   group.add(slab);
 
   // Glowing rim around the top edge.
-  const rimPts = shape.getPoints(96).map((p) => new THREE.Vector3(p.x + island.cx, 0.0, p.y + island.cz));
-  rimPts.push(rimPts[0].clone());
-  const rimMat = new THREE.LineBasicMaterial({ color: theme.island.edge, transparent: true, opacity: theme.island.edgeAlpha, blending: blend });
-  group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(rimPts), rimMat));
+  const rimMat = rimMaterial(theme.island.edge, theme.island.edgeAlpha, blend);
+  rimMat.transparent = true;
+  group.add(rimLine(shape, 96, island.cx, 0.0, island.cz, rimMat));
   if (glass) island.glass.push({ mat: rimMat, opacity: rimMat.opacity });
 
   // Cluster name along the front edge, larger on big islands.
@@ -317,16 +342,19 @@ export function buildWorkerDeck(group, deck, theme, opts) {
   const geo = new THREE.ExtrudeGeometry(shape, { depth: 1.0, bevelEnabled: true, bevelThickness: 0.3, bevelSize: 0.3, bevelSegments: 2, curveSegments: 10 });
   geo.rotateX(Math.PI / 2);
   const fill = new THREE.Color(theme.island.fill).offsetHSL(0, 0, light ? -0.03 : 0.025);
+  // The opaque surfaces under the deck's outlines are pushed back in depth
+  // (polygon offset): zoomed out, the depth buffer can't tell a line a few
+  // hundredths above a face from the face, and the outline breaks into dashes.
+  const under = { polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 };
   const slab = new THREE.Mesh(geo, [
-    fading(new THREE.MeshStandardMaterial({ color: fill, roughness: light ? 0.9 : 0.75, metalness: light ? 0 : 0.25 })),
-    fading(new THREE.MeshStandardMaterial({ color: theme.island.side, roughness: light ? 0.9 : 0.75, metalness: light ? 0 : 0.25 })),
+    fading(new THREE.MeshStandardMaterial({ color: fill, roughness: light ? 0.9 : 0.75, metalness: light ? 0 : 0.25, ...under })),
+    fading(new THREE.MeshStandardMaterial({ color: theme.island.side, roughness: light ? 0.9 : 0.75, metalness: light ? 0 : 0.25, ...under })),
   ]);
   slab.position.set(deck.cx, -0.3, deck.cz);
   slab.receiveShadow = true;
   group.add(slab);
-  const rim = shape.getPoints(64).map((p) => new THREE.Vector3(p.x + deck.cx, 0.0, p.y + deck.cz));
-  rim.push(rim[0].clone());
-  group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(rim), fading(new THREE.LineBasicMaterial({ color: theme.worker.padEdge, blending: opts.blending }), theme.island.edgeAlpha)));
+  // The slab's top is at y = 0; the rim floats just above it, like the agent deck's.
+  group.add(rimLine(shape, 64, deck.cx, 0.05, deck.cz, fading(rimMaterial(theme.worker.padEdge, 1, opts.blending), theme.island.edgeAlpha)));
   // The deck's name along its front edge.
   const nameSize = Math.min(1.3 * Math.max(1, deck.width / 120), 6);
   const name = opts.makeText('workers', { size: nameSize, color: theme.island.label });
@@ -337,7 +365,7 @@ export function buildWorkerDeck(group, deck, theme, opts) {
   // Pool frames: flat tiles with outlines, one instanced mesh.
   const frames = deck.frames || [];
   if (frames.length) {
-    const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), fading(new THREE.MeshStandardMaterial({ roughness: light ? 0.9 : 0.7, metalness: light ? 0 : 0.2 })), frames.length);
+    const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), fading(new THREE.MeshStandardMaterial({ roughness: light ? 0.9 : 0.7, metalness: light ? 0 : 0.2, ...under })), frames.length);
     mesh.receiveShadow = true;
     mesh.frustumCulled = false;
     const m4 = new THREE.Matrix4();
