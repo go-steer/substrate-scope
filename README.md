@@ -40,7 +40,7 @@ Requires Agent Substrate **v0.4.0** (the collector is built against it). The col
 If Substrate's API server runs with authorization enforced (`--experimental-enable-authz`), grant the collector the **global viewer** role: an entry `user:system:serviceaccount:substrate-scope:substrate-scope` under role `viewer` in the global access policy, created or updated by one of the `--authz-bootstrap-owners`. Without it, listing atespaces and actors fails with PermissionDenied. See [Authorization](docs/design.md#authorization) for which calls are checked and a grpcurl example.
 
 ```sh
-kubectl apply -f deploy/substrate-scope.yaml
+kubectl apply -f deploy/namespace.yaml -f deploy/substrate-scope.yaml
 kubectl -n substrate-scope port-forward svc/substrate-scope 8080:80
 # open http://localhost:8080
 ```
@@ -82,10 +82,11 @@ mast lists only the sessions it holds in memory. A woken agent starts with none,
 make test          # Go and JS unit tests
 make ci            # gofmt/goimports, vet, tests, JS syntax check + ESLint (npm ci first)
 make run-local     # run the collector on your machine against $CONTEXT, serving web/ from disk
-make push deploy   # build, push to IMAGE, pin the digest in deploy/, apply
+make deploy        # apply deploy/ by hand with the latest main image (by digest)
+make push          # build and push a local tree; then make deploy IMAGE_REF=<printed ref>
 ```
 
-CI pushes an image for every merge to main, tagged with the commit (`IMAGE:<sha>`, and `IMAGE:main` for the latest); the run's summary has the digest. To release one, pin that digest in `deploy/substrate-scope.yaml` and `make deploy`. `make push` is still there for images built from a local tree.
+Every merge to main is built and deployed by CI: the image job pushes `IMAGE:<sha>` and `IMAGE:main`, then the deploy job applies `deploy/substrate-scope.yaml` to agent-substrate with that exact digest and waits for the rollout. Each run's summary says what it deployed. The digest in the file is only where a new cluster starts. CI acts as the `substrate-scope-image` Google service account through workload identity federation, accepted only for this repo's main; on the cluster it may only touch the `substrate-scope` namespace (`deploy/ci-rbac.yaml`, applied once by hand, with `roles/container.clusterViewer` on the project).
 
 `dev/run-local` port-forwards Substrate's API server, ax-server and the router, mints a short-lived token for the `substrate-scope` service account and fetches the CA bundle into `.dev/` (git-ignored).
 

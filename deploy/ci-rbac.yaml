@@ -1,0 +1,52 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# What CI's deploy job may do on the cluster: apply substrate-scope.yaml
+# (ServiceAccount, Deployment, Service) and watch the rollout, in this
+# namespace only. CI acts as the substrate-scope-image Google service account
+# (workload identity federation, main only), which also needs
+# roles/container.clusterViewer on the project to reach the control plane.
+# Applied once by hand; CI can't change its own rights.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: substrate-scope-deployer
+  namespace: substrate-scope
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services", "serviceaccounts"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: substrate-scope-deployer
+  namespace: substrate-scope
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: substrate-scope-deployer
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: substrate-scope-image@gke-demos-345619.iam.gserviceaccount.com

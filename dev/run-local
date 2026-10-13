@@ -23,9 +23,15 @@
 #
 #   CONTEXT=agent-substrate dev/run-local            # UI on http://localhost:8080
 #   ATTACH_TOKEN_FILE=path dev/run-local             # also enable the attach proxy
+#
+# On a Cloud Workstation, open the UI through its port proxy: that rewrites
+# Host, so pages from *.cloudworkstations.dev are allowed here by default
+# (SCOPE_ALLOWED_ORIGINS= turns that off). The deployed collector allows only
+# its own host.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 CONTEXT=${CONTEXT:-$(kubectl config current-context)}
+export SCOPE_ALLOWED_ORIGINS=${SCOPE_ALLOWED_ORIGINS-*.cloudworkstations.dev}
 K="kubectl --context $CONTEXT"
 mkdir -p .dev
 chmod 700 .dev
