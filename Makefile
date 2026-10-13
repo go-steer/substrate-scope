@@ -55,16 +55,21 @@ generate:
 image:
 	docker build -t $(IMAGE):dev .
 
-# Push and pin the pushed digest in deploy/substrate-scope.yaml.
+# Push a locally built image and print its digest; deploy it with
+# `make deploy IMAGE_REF=...`. (CI builds, pushes and deploys main itself.)
 push: image
 	docker push $(IMAGE):dev
-	@digest=$$(docker inspect --format='{{index .RepoDigests 0}}' $(IMAGE):dev | sed 's/.*@//'); \
-	  sed -i "s#substrate-scope@sha256:[0-9a-f]*#substrate-scope@$$digest#" deploy/substrate-scope.yaml; \
-	  echo "pinned $$digest"
+	@echo "IMAGE_REF=$$(docker inspect --format='{{index .RepoDigests 0}}' $(IMAGE):dev)"
 
+# Apply deploy/ by hand, always by digest: IMAGE_REF, or else the digest of
+# the latest main build (what CI deploys).
 deploy:
-	kubectl --context $(CONTEXT) apply -f deploy/substrate-scope.yaml
-	kubectl --context $(CONTEXT) -n substrate-scope rollout status deploy/substrate-scope
+	@ref="$(IMAGE_REF)"; \
+	  [ -n "$$ref" ] || ref="$(IMAGE)@$$(gcloud artifacts docker images describe $(IMAGE):main --format='value(image_summary.digest)')"; \
+	  echo "deploying $$ref"; \
+	  kubectl --context $(CONTEXT) apply -f deploy/namespace.yaml && \
+	  sed "s#image: $(IMAGE)@sha256:[0-9a-f]*#image: $$ref#" deploy/substrate-scope.yaml | kubectl --context $(CONTEXT) apply -f - && \
+	  kubectl --context $(CONTEXT) -n substrate-scope rollout status deploy/substrate-scope
 
 # Run the collector locally against CONTEXT (see dev/run-local).
 run-local:

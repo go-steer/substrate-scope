@@ -13,17 +13,17 @@
 # limitations under the License.
 
 # substrate-scope on one cluster: the collector polls Agent Substrate and ax
-# and serves the UI on :8080. Access it with
-#   kubectl -n substrate-scope port-forward svc/substrate-scope 8080:80
+# and serves the UI on :8080. The namespace is in namespace.yaml.
+#
+# CI applies this file on every merge to main with the image digest it just
+# built (see .github/workflows/ci.yml), so the digest below is only where a
+# fresh cluster starts. `make deploy` applies it by hand with the digest of
+# the latest main build, or IMAGE_REF.
 #
 # The attach proxy is off unless the Secret "substrate-scope-attach" exists
 # (key "token": the bearer token agents expect on their session API):
 #   kubectl -n substrate-scope create secret generic substrate-scope-attach --from-file=token=PATH
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: substrate-scope
----
+
 # Substrate v0.4.0 checks ListAtespaces, ListActors and GetActor when its API
 # server runs with --experimental-enable-authz. Then grant this account the
 # global viewer role (member
@@ -71,9 +71,6 @@ spec:
             - "--ax-endpoint=ax-server.ax-system.svc.cluster.local:8080"
             - "--router=atenet-router.ate-system.svc.cluster.local:80"
             - "--attach-token-file=/run/attach/token"
-            # The UI is reached through Cloud Workstations' port proxy, which
-            # rewrites Host, so the browser's Origin must be allowed explicitly.
-            - "--allowed-origins=*.cloudworkstations.dev"
           ports:
             - containerPort: 8080
               name: http
