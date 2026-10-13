@@ -222,7 +222,7 @@ export function syntheticSnapshot(n, seed = 7, opts = {}) {
     made += count;
   }
   allocate(workers, agents, opts.resources !== false);
-  return { cluster: `synthetic-${n}`, source: 'synthetic', seq: 1, features: { attach: true, mastWeb: true }, sources: [], atespaces, agents, workers };
+  return { cluster: `synthetic-${n}`, source: 'synthetic', seq: 1, features: { attach: true, mastWeb: true, raw: true }, sources: [], atespaces, agents, workers };
 }
 
 function syntheticTask(state, at) {
@@ -267,6 +267,82 @@ export function syntheticDetail(a, workers) {
     runner: running ? { idleSeconds: Math.floor(r() * 420), inFlight: 0 } : null,
     runnerTime: new Date().toISOString(),
   };
+}
+
+/** The raw objects for a synthetic agent (what GET .../raw would say: protojson, redacted). */
+export function syntheticRaw(a, workers) {
+  const d = syntheticDetail(a, workers);
+  if (!d) return null;
+  const ag = d.agent;
+  const status = { state: `ACTOR_STATE_${ag.state}` };
+  if (ag.worker) {
+    status.workerAssignment = {
+      worker: { name: ag.worker },
+      workerNamespace: 'ax-workers',
+      workerPool: 'ax-pool',
+      workerPod: ag.workerPod,
+      workerPodIps: ['10.59.129.70'],
+      nodeName: ag.workerNode,
+      workerEpoch: '3',
+    };
+    status.assignedNode = ag.workerNode;
+  }
+  if (ag.snapshotURI) status.externalSnapshot = { snapshotUri: ag.snapshotURI, contentScope: 'SNAPSHOT_CONTENT_SCOPE_FULL' };
+  if (ag.crash) status.crash = { message: ag.crash.message, crashTime: ag.crash.time };
+  const objects = [
+    {
+      section: 'substrate',
+      kind: 'Actor',
+      name: ag.name,
+      object: {
+        metadata: { atespace: ag.atespace, name: ag.name, uid: ag.uid, version: '12', createTime: ag.stateSince, updateTime: ag.stateSince },
+        actorTemplate: { atespace: ag.atespace, name: 'ax-runner' },
+        status,
+      },
+    },
+  ];
+  const t = ag.task;
+  if (t) {
+    objects.push({
+      section: 'task',
+      kind: 'Task',
+      name: ag.name,
+      object: {
+        apiVersion: 'ax.dev/v1alpha1',
+        kind: 'Task',
+        metadata: { name: ag.name, atespace: ag.atespace, creationTimestamp: ag.stateSince },
+        spec: {
+          image: t.image,
+          env: [
+            { name: 'GEMINI_API_KEY', value: '<redacted>' },
+            { name: 'LOG_LEVEL', value: '<redacted>' },
+          ],
+          resources: { requests: { cpu: '500m', memory: '1Gi' } },
+          workspaces: (t.workspaces || []).map((w) => ({ name: w, path: `/workspace/${w}` })),
+          http: { port: t.httpPort },
+          idle: { suspendAfter: t.idleSuspendAfter },
+        },
+        status: { phase: t.phase, id: ag.uid, actor: ag.name, conditions: t.conditions },
+      },
+    });
+    for (const w of t.workspaces || []) {
+      objects.push({
+        section: 'task',
+        kind: 'Workspace',
+        name: w,
+        object: {
+          apiVersion: 'ax.dev/v1alpha1',
+          kind: 'Workspace',
+          metadata: { name: w, atespace: ag.atespace },
+          spec: {
+            git: [{ name: 'app', repo: 'https://example.com/org/app.git', branch: 'main', dir: 'app', depth: 1 }],
+            files: [{ path: '/etc/agent/AGENTS.md', content: '<redacted> (412 bytes)' }],
+          },
+        },
+      });
+    }
+  }
+  return { objects };
 }
 
 /**

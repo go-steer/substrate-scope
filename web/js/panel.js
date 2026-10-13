@@ -21,8 +21,13 @@
 // only the live fields (state, age, idle bar, phase, conditions); the
 // sessions section is rebuilt only by the user's own actions or when the
 // agent starts or stops running. Nothing here scrolls the panel.
+//
+// The Substrate and ax sections end in a collapsed "YAML" block with the raw
+// objects behind them (Actor; Task and Workspaces), fetched when a block is
+// opened. The collector redacts them before they leave it.
 
 import { esc, duration, since, parseGoDuration, workerLabel, clock } from './format.js';
+import { toYAML } from './yaml.js';
 import { cssColor } from './scene.js';
 import { stateClass } from './model.js';
 import { apiBase, mastWebURL, sessionLine, emptySessionsNote, attachError, wakeRetryDelay, WAKE_RETRY_MS } from './sessions.js';
@@ -47,7 +52,7 @@ function mono(s) {
 export class Panel {
   /**
    * @param {HTMLElement} el
-   * @param {{onClose: Function, features: () => any}} opts
+   * @param {{onClose: Function, features: () => any, detail?: Function, raw?: Function}} opts
    */
   constructor(el, opts) {
     this.el = el;
@@ -56,9 +61,13 @@ export class Panel {
     this.detail = null;
     this.fetchedAt = 0;
     this.loadingKey = null;
+    this.raw = null;
+    this.rawLoading = null;
     this.resetSessions();
     this.timer = setInterval(() => this.tick(), 1000);
     el.addEventListener('click', (e) => this.onClick(e));
+    // toggle doesn't bubble; listen in the capture phase.
+    el.addEventListener('toggle', (e) => e.target.matches?.('details.raw') && e.target.open && this.loadRaw(), true);
   }
 
   resetSessions() {
@@ -74,6 +83,7 @@ export class Panel {
     if (key !== this.key) {
       this.resetSessions();
       this.detail = null;
+      this.raw = null;
       this.el.innerHTML = '';
     }
     this.key = key;
@@ -271,7 +281,7 @@ export class Panel {
       <button class="close" data-act="close" title="Close">×</button></div>
       <div class="state-line"><span class="state-badge" data-live="state" data-cls="${stateClass(a.state)}" style="--c:${cssColor(a.state)}">${esc(a.state)}</span>
       <span class="muted">for <span data-live="age">${duration(since(a.stateSince))}</span></span></div>`);
-    parts.push(`<section><h3>Agent Substrate</h3><div data-live="substrate">${this.substrateHTML()}</div></section>`);
+    parts.push(`<section><h3>Agent Substrate</h3><div data-live="substrate">${this.substrateHTML()}</div>${this.rawBlockHTML('substrate')}</section>`);
     if (t) {
       const policy = [];
       if (t.idleSuspendAfter) policy.push(`suspend after ${esc(t.idleSuspendAfter)} idle`);
@@ -285,6 +295,7 @@ export class Panel {
         ${row('Serves', t.httpPort ? `API on port ${t.httpPort} through the router` : '')}
         ${row('Workspaces', (t.workspaces || []).map(esc).join(', '))}
         <div data-live="conds">${this.condsHTML()}</div>
+        ${this.rawBlockHTML('task')}
       </section>`);
     } else {
       parts.push(`<section><h3>ax task</h3><p class="muted">Not an ax task.</p></section>`);
@@ -292,6 +303,61 @@ export class Panel {
     parts.push(`<section data-sessions></section>`);
     this.el.innerHTML = parts.join('');
     this.renderSessions();
+  }
+
+  /** The collapsed YAML block for a section ("substrate" or "task"), if the collector serves raw objects. */
+  rawBlockHTML(section) {
+    if (!this.opts.raw && !this.opts.features?.()?.raw) return '';
+    return `<details class="raw" data-raw="${section}"><summary>YAML</summary><div class="raw-body">${this.rawBodyHTML(section)}</div></details>`;
+  }
+
+  rawBodyHTML(section) {
+    if (!this.raw) return '<p class="muted">Loading…</p>';
+    if (this.raw.error) return `<p class="crash">${esc(this.raw.error)}</p>`;
+    const items = [];
+    this.raw.objects.forEach((o, i) => {
+      if (o.section !== section) return;
+      const head = `<div class="raw-head"><span>${esc(o.kind)} ${mono(o.name)}</span>${o.object ? `<button class="linkbtn" data-act="copy-yaml" data-i="${i}" title="Copy this YAML">copy</button>` : ''}</div>`;
+      items.push(head + (o.error ? `<p class="crash">${esc(o.error)}</p>` : `<pre class="yaml">${esc(toYAML(o.object))}</pre>`));
+    });
+    if (!items.length) return '<p class="muted">Nothing to show.</p>';
+    return items.join('') + '<p class="hint">Sensitive values (env values, tokens, file contents) are redacted by the collector.</p>';
+  }
+
+  /** Fetches the raw objects (on every open, so they're current) and fills the open blocks. */
+  async loadRaw() {
+    const key = this.key;
+    if (!key || this.rawLoading === key) return;
+    this.rawLoading = key;
+    let raw;
+    try {
+      if (this.opts.raw) raw = this.opts.raw(key) || { objects: [] };
+      else {
+        const resp = await fetch(`${apiBase(key)}/raw`, { cache: 'no-store' });
+        raw = resp.ok ? await resp.json() : { error: `HTTP ${resp.status}` };
+      }
+    } catch (err) {
+      raw = { error: String(err.message || err) };
+    } finally {
+      if (this.rawLoading === key) this.rawLoading = null;
+    }
+    if (key !== this.key) return;
+    this.raw = raw;
+    for (const d of this.el.querySelectorAll('details.raw')) {
+      const body = d.querySelector('.raw-body');
+      const html = this.rawBodyHTML(d.dataset.raw);
+      if (body.innerHTML !== html) body.innerHTML = html;
+    }
+  }
+
+  copyYAML(btn) {
+    const o = this.raw?.objects?.[Number(btn.dataset.i)];
+    if (!o?.object) return;
+    const done = (label) => {
+      btn.textContent = label;
+      setTimeout(() => (btn.textContent = 'copy'), 1500);
+    };
+    navigator.clipboard?.writeText(toYAML(o.object)).then(() => done('copied'), () => done('copy failed')) ?? done('copy failed');
   }
 
   renderSessions() {
@@ -427,6 +493,9 @@ export class Panel {
         break;
       case 'show-worker':
         this.opts.onShowWorker?.(btn.dataset.worker);
+        break;
+      case 'copy-yaml':
+        this.copyYAML(btn);
         break;
       case 'sessions':
         this.listSessions(false);

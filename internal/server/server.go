@@ -17,6 +17,7 @@
 //	GET /api/snapshot                          the whole picture
 //	GET /api/stream                            WebSocket: snapshot, then event batches
 //	GET /api/agents/{atespace}/{name}          side panel details (+ runner status if running)
+//	GET /api/agents/{atespace}/{name}/raw      the agent's API objects (Actor, Task, Workspaces), redacted
 //	ANY /api/agents/{atespace}/{name}/attach/… optional proxy to the agent's session API
 //	GET /mast-web/a/{atespace}/{name}/…      mast-web attached to that agent (see mastweb.go)
 //	GET /config                                mast-web's bootstrap
@@ -35,10 +36,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/coder/websocket"
+	"google.golang.org/protobuf/proto"
 
+	"github.com/go-steer/substrate-scope/internal/axapi"
 	"github.com/go-steer/substrate-scope/internal/collector"
 	"github.com/go-steer/substrate-scope/internal/model"
+	"github.com/go-steer/substrate-scope/internal/raw"
 	"github.com/go-steer/substrate-scope/internal/router"
 )
 
@@ -52,6 +57,18 @@ type ActorStateGetter interface {
 // RunnerStatusReader reads an ax runner's status through the router.
 type RunnerStatusReader interface {
 	RunnerStatus(ctx context.Context, atespace, name string) (*router.RunnerStatus, error)
+}
+
+// ActorGetter reads a Substrate actor (answered from Substrate's database; it
+// never wakes the actor).
+type ActorGetter interface {
+	GetActor(ctx context.Context, atespace, name string) (*ateapipb.Actor, error)
+}
+
+// TaskGetter reads ax tasks and workspaces (from ax's store).
+type TaskGetter interface {
+	GetTask(ctx context.Context, atespace, name string) (*axapi.Task, error)
+	GetWorkspace(ctx context.Context, atespace, name string) (*axapi.Workspace, error)
 }
 
 // Options configures the server.
@@ -70,6 +87,10 @@ type Options struct {
 	MastWeb fs.FS
 	// AttachToken supplies the agent bearer token for Attach.
 	AttachToken router.TokenSource
+	// RawActors and RawTasks, when set, serve the raw objects behind an
+	// agent (redacted, see package raw) for the panel's YAML view.
+	RawActors ActorGetter
+	RawTasks  TaskGetter
 	// RunnerCacheTTL caches runner status per agent, default 2s.
 	RunnerCacheTTL time.Duration
 	// PingInterval keeps WebSockets alive, default 20s.
@@ -111,6 +132,7 @@ func New(o Options) *Server {
 	s.mux.HandleFunc("GET /api/snapshot", s.snapshot)
 	s.mux.HandleFunc("GET /api/stream", s.stream)
 	s.mux.HandleFunc("GET /api/agents/{atespace}/{name}", s.agent)
+	s.mux.HandleFunc("GET /api/agents/{atespace}/{name}/raw", s.raw)
 	s.mux.HandleFunc("/api/agents/{atespace}/{name}/attach/{rest...}", s.attach)
 	s.mux.HandleFunc("GET /config", s.mastWebConfigHandler)
 	s.mux.HandleFunc("GET /mast-web/a/{atespace}/{name}", s.mastWebRedirect)
@@ -247,6 +269,66 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request) {
 		d.Runner, d.RunnerNote = st, note
 		if st != nil {
 			d.RunnerTime = &at
+		}
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
+// RawObject is one API object for the panel's YAML view. Section is the
+// panel section it belongs under ("substrate" or "task").
+type RawObject struct {
+	Section string `json:"section"`
+	Kind    string `json:"kind"`
+	Name    string `json:"name"`
+	Object  any    `json:"object,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// RawDetail is the response of GET /api/agents/{atespace}/{name}/raw.
+type RawDetail struct {
+	Objects []RawObject `json:"objects"`
+}
+
+// rawTimeout bounds the reads behind one raw request.
+const rawTimeout = 5 * time.Second
+
+// raw returns the agent's Substrate Actor and, for an ax task, its Task and
+// Workspaces, as redacted JSON. Only read RPCs are used, so it never wakes
+// the agent; an object that can't be read carries its error instead.
+func (s *Server) raw(w http.ResponseWriter, r *http.Request) {
+	as, name := r.PathValue("atespace"), r.PathValue("name")
+	a, ok := s.o.Store.Agent(as, name)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such agent"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), rawTimeout)
+	defer cancel()
+	d := RawDetail{Objects: []RawObject{}}
+	add := func(section, kind, name string, m proto.Message, err error) {
+		o := RawObject{Section: section, Kind: kind, Name: name}
+		if err == nil {
+			o.Object, err = raw.Proto(m)
+		}
+		if err != nil {
+			o.Error = err.Error()
+		}
+		d.Objects = append(d.Objects, o)
+	}
+	if s.o.RawActors != nil {
+		m, err := s.o.RawActors.GetActor(ctx, as, name)
+		add("substrate", "Actor", name, m, err)
+	}
+	if a.Task != nil && s.o.RawTasks != nil {
+		task := a.Task.Name
+		if task == "" {
+			task = name
+		}
+		m, err := s.o.RawTasks.GetTask(ctx, as, task)
+		add("task", "Task", task, m, err)
+		for _, ws := range a.Task.Workspaces {
+			m, err := s.o.RawTasks.GetWorkspace(ctx, as, ws)
+			add("task", "Workspace", ws, m, err)
 		}
 	}
 	writeJSON(w, http.StatusOK, d)

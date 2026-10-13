@@ -99,6 +99,7 @@ func run() error {
 	}
 	defer sub.Close()
 
+	var axReader server.TaskGetter
 	copts := cluster.Options{
 		Substrate:      sub,
 		ActorInterval:  *actorEvery,
@@ -112,11 +113,12 @@ func run() error {
 		}
 		defer axc.Close()
 		copts.AX = axc
+		axReader = axc
 	}
 	var src collector.Source = cluster.New(copts)
 
-	sopts := server.Options{Actors: sub, AllowedOrigins: splitList(*origins)}
-	features := model.Features{}
+	sopts := server.Options{Actors: sub, RawActors: sub, RawTasks: axReader, AllowedOrigins: splitList(*origins)}
+	features := model.Features{Raw: true}
 	if *routerAddr != "" {
 		rc := &router.Client{Addr: *routerAddr}
 		sopts.Runner = rc
