@@ -23,6 +23,9 @@ import (
 )
 
 // Actor states, as Substrate names them without the ACTOR_STATE_ prefix.
+// PAUSING and PAUSED are no longer Substrate states (v0.5 dropped them); the
+// collector derives them from SUSPENDING/SUSPENDED and the actor's latest
+// snapshot (see substrate.ToAgent).
 const (
 	StateUnspecified = "UNSPECIFIED"
 	StateResuming    = "RESUMING"
@@ -68,9 +71,10 @@ type Agent struct {
 	// worker, or holding its node-local snapshot while PAUSED. Empty when
 	// detached.
 	AssignedNode string `json:"assignedNode,omitempty"`
-	// SnapshotURI is the actor's current external snapshot, if any.
+	// SnapshotURI is the actor's latest completed durable snapshot, if any.
 	SnapshotURI string `json:"snapshotURI,omitempty"`
-	// SnapshotInProgress is set while the actor is taking a snapshot.
+	// SnapshotInProgress is set while the actor is taking a snapshot (its
+	// latest one is uploading, or is a local checkpoint not captured yet).
 	SnapshotInProgress bool       `json:"snapshotInProgress,omitempty"`
 	Crash              *Crash     `json:"crash,omitempty"`
 	Version            int64      `json:"version,omitempty"`

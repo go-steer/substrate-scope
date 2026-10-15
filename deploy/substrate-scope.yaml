@@ -24,9 +24,12 @@
 # (key "token": the bearer token agents expect on their session API):
 #   kubectl -n substrate-scope create secret generic substrate-scope-attach --from-file=token=PATH
 
-# Substrate v0.4.0 checks ListAtespaces, ListActors and GetActor when its API
-# server runs with --experimental-enable-authz. Then grant this account the
-# global viewer role (member
+# Substrate v0.5.0 admits in-cluster API clients only from namespaces labeled
+# ate.dev/api-access=true (namespace.yaml sets it; CI does not apply that file,
+# so label an existing namespace by hand).
+#
+# With --experimental-enable-authz, v0.5.0 checks all five calls the collector
+# makes. Then grant this account the global viewer role (member
 # "user:system:serviceaccount:substrate-scope:substrate-scope"); see
 # "Authorization" in docs/design.md. Without enforcement no grant is needed.
 apiVersion: v1

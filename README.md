@@ -35,7 +35,7 @@ Rendered with three.js, GPU instancing and semantic zoom (district heat tiles fa
 
 ## Quickstart (in a cluster)
 
-Requires Agent Substrate **v0.4.0** (the collector is built against it). The collector runs as its own service account in namespace `substrate-scope`. It authenticates to Substrate's control API with a projected token for audience `api.ate-system.svc` and trusts the servicedns CA bundle, the same way ax-server does.
+Requires Agent Substrate **v0.5.0** (the collector is built against it; v0.4 API servers are not supported). The collector runs as its own service account in namespace `substrate-scope`, which must carry the label `ate.dev/api-access=true`: from v0.5, NetworkPolicies in `ate-system` admit in-cluster callers of the Substrate API only from labeled namespaces (`deploy/namespace.yaml` sets it; for an existing namespace, `kubectl label namespace substrate-scope ate.dev/api-access=true`). It authenticates to Substrate's control API with a projected token for audience `api.ate-system.svc` and trusts the servicedns CA bundle, the same way ax-server does.
 
 If Substrate's API server runs with authorization enforced (`--experimental-enable-authz`), grant the collector the **global viewer** role: an entry `user:system:serviceaccount:substrate-scope:substrate-scope` under role `viewer` in the global access policy, created or updated by one of the `--authz-bootstrap-owners`. Without it, listing atespaces and actors fails with PermissionDenied. See [Authorization](docs/design.md#authorization) for which calls are checked and a grpcurl example.
 

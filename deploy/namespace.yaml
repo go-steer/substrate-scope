@@ -15,7 +15,12 @@
 # The namespace, apart from substrate-scope.yaml so that CI, which applies
 # that file on every merge, only needs rights inside the namespace. Created
 # once by `make deploy`.
+#
+# ate.dev/api-access: Substrate v0.5's NetworkPolicies in ate-system admit
+# in-cluster Substrate API clients only from namespaces with this label.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: substrate-scope
+  labels:
+    ate.dev/api-access: "true"

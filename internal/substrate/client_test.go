@@ -42,14 +42,14 @@ func (f *fakeAPI) ListActors(_ context.Context, in *ateapipb.ListActorsRequest, 
 		return nil, f.err
 	}
 	start := 0
-	if in.GetPageToken() != "" {
+	if in.GetOptions().GetPageToken() != "" {
 		var err error
-		if start, err = strconv.Atoi(in.GetPageToken()); err != nil {
+		if start, err = strconv.Atoi(in.GetOptions().GetPageToken()); err != nil {
 			return nil, err
 		}
 	}
 	resp := &ateapipb.ListActorsResponse{}
-	end := min(start+int(in.GetPageSize()), f.actors)
+	end := min(start+int(in.GetOptions().GetPageSize()), f.actors)
 	for i := start; i < end; i++ {
 		resp.Actors = append(resp.Actors, &ateapipb.Actor{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: in.GetAtespace(), Name: fmt.Sprintf("a%03d", i)},
@@ -116,8 +116,9 @@ func TestToAgent(t *testing.T) {
 				Worker: &ateapipb.ObjectRef{Name: "w-1"}, WorkerPod: "atelet-abc", NodeName: "node-1",
 				WorkerPodIps: []string{"", "10.0.0.7", "fd00::7"}, WorkerEpoch: 2,
 			},
-			AssignedNode:     "node-1",
-			ExternalSnapshot: &ateapipb.ExternalSnapshot{SnapshotUri: "gs://b/s"},
+			AssignedNode:           "node-1",
+			LastAssignedGeneration: 1,
+			Snapshots:              []*ateapipb.Snapshot{durable(1, completed, "gs://b/s")},
 		},
 	})
 	if a.State != "RUNNING" || a.Worker != "w-1" || a.WorkerPod != "atelet-abc" || a.Template != "cred-test/ax-mast-triage" || a.SnapshotURI != "gs://b/s" {
@@ -130,10 +131,76 @@ func TestToAgent(t *testing.T) {
 	// snapshot.
 	a = ToAgent(&ateapipb.Actor{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: "x", Name: "p"},
-		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_PAUSED, AssignedNode: "node-2"},
+		Status: &ateapipb.ActorStatus{
+			State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED, AssignedNode: "node-2",
+			LastAssignedGeneration: 2, Snapshots: []*ateapipb.Snapshot{durable(1, completed, "gs://b/old"), local(2, "node-2")},
+		},
 	})
 	if a.State != "PAUSED" || a.Worker != "" || a.WorkerIP != "" || a.WorkerIPs != nil || a.AssignedNode != "node-2" {
 		t.Fatalf("ToAgent paused = %+v", a)
+	}
+}
+
+const (
+	pending   = ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING
+	completed = ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
+)
+
+func durable(gen int32, status ateapipb.SnapshotStorageStatus, uri string) *ateapipb.Snapshot {
+	return &ateapipb.Snapshot{Generation: gen, DurableSnapshot: &ateapipb.SnapshotStorage{
+		Status: status, Object: &ateapipb.ObjectSnapshot{SnapshotUri: uri},
+	}}
+}
+
+func local(gen int32, node string) *ateapipb.Snapshot {
+	return &ateapipb.Snapshot{Generation: gen, Locality: node}
+}
+
+// TestToAgentSnapshots covers what v0.5's snapshot list (Actor Lifecycle v2)
+// turns into: the derived PAUSING/PAUSED states, the snapshot to show and
+// whether one is being taken.
+func TestToAgentSnapshots(t *testing.T) {
+	const (
+		running    = ateapipb.ActorState_ACTOR_STATE_RUNNING
+		suspending = ateapipb.ActorState_ACTOR_STATE_SUSPENDING
+		suspended  = ateapipb.ActorState_ACTOR_STATE_SUSPENDED
+		crashed    = ateapipb.ActorState_ACTOR_STATE_CRASHED
+		reverting  = ateapipb.ActorState_ACTOR_STATE_REVERTING
+	)
+	for _, tc := range []struct {
+		name       string
+		state      ateapipb.ActorState
+		gen        int32
+		snaps      []*ateapipb.Snapshot
+		wantState  string
+		wantURI    string
+		inProgress bool
+	}{
+		{"never snapshotted", running, 0, nil, "RUNNING", "", false},
+		{"suspending", suspending, 2, []*ateapipb.Snapshot{durable(1, completed, "gs://b/1"), durable(2, pending, "gs://b/2")}, "SUSPENDING", "gs://b/1", true},
+		{"suspended", suspended, 2, []*ateapipb.Snapshot{durable(2, completed, "gs://b/2")}, "SUSPENDED", "gs://b/2", false},
+		{"pausing", suspending, 3, []*ateapipb.Snapshot{durable(2, completed, "gs://b/2"), {Generation: 3}}, "PAUSING", "gs://b/2", true},
+		{"paused", suspended, 3, []*ateapipb.Snapshot{durable(2, completed, "gs://b/2"), local(3, "node-1")}, "PAUSED", "gs://b/2", false},
+		{"paused, never suspended", suspended, 1, []*ateapipb.Snapshot{local(1, "node-1")}, "PAUSED", "", false},
+		// A suspend of a paused actor uploads its local snapshot: the
+		// generation keeps its locality and gains a pending durable copy.
+		{"suspending a paused actor", suspending, 1, []*ateapipb.Snapshot{{Generation: 1, Locality: "node-1", DurableSnapshot: &ateapipb.SnapshotStorage{Status: pending}}}, "SUSPENDING", "", true},
+		{"suspended after a pause", suspended, 1, []*ateapipb.Snapshot{durable(1, completed, "gs://b/1")}, "SUSPENDED", "gs://b/1", false},
+		// Resumed from a pause: the local snapshot stays, but it is running.
+		{"resumed from pause", running, 1, []*ateapipb.Snapshot{local(1, "node-1")}, "RUNNING", "", false},
+		{"crashed", crashed, 1, []*ateapipb.Snapshot{durable(1, completed, "gs://b/1")}, "CRASHED", "gs://b/1", false},
+		{"reverting", reverting, 2, []*ateapipb.Snapshot{durable(1, completed, "gs://b/1")}, "REVERTING", "gs://b/1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := ToAgent(&ateapipb.Actor{
+				Metadata: &ateapipb.ResourceMetadata{Atespace: "x", Name: "a"},
+				Status:   &ateapipb.ActorStatus{State: tc.state, LastAssignedGeneration: tc.gen, Snapshots: tc.snaps},
+			})
+			if a.State != tc.wantState || a.SnapshotURI != tc.wantURI || a.SnapshotInProgress != tc.inProgress {
+				t.Fatalf("state %q, snapshot %q, in progress %v; want %q, %q, %v",
+					a.State, a.SnapshotURI, a.SnapshotInProgress, tc.wantState, tc.wantURI, tc.inProgress)
+			}
+		})
 	}
 }
 
