@@ -41,7 +41,11 @@ test('applyEvents follows sequence numbers and rejects gaps', () => {
 test('state classes and filters', () => {
   assert.equal(stateClass('RUNNING'), 'running');
   assert.equal(stateClass('SUSPENDING'), 'transition');
+  // PAUSING and PAUSED are derived by the collector (Substrate v0.5 dropped
+  // them); REVERTING is v0.5's crash-recovery state.
+  assert.equal(stateClass('PAUSING'), 'transition');
   assert.equal(stateClass('PAUSED'), 'suspended');
+  assert.equal(stateClass('REVERTING'), 'transition');
   assert.equal(stateClass('CRASHED'), 'crashed');
   assert.equal(stateClass('UNSPECIFIED'), 'pending');
   const f = makeFilter({ prefix: 'look', classes: new Set(['running']) });

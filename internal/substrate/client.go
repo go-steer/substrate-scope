@@ -181,7 +181,7 @@ func paginate(fetch func(token string) (next string, err error)) error {
 func (c *Client) ListAtespaces(ctx context.Context) ([]*ateapipb.Atespace, error) {
 	var out []*ateapipb.Atespace
 	err := paginate(func(token string) (string, error) {
-		resp, err := c.api.ListAtespaces(ctx, &ateapipb.ListAtespacesRequest{PageSize: c.PageSize, PageToken: token})
+		resp, err := c.api.ListAtespaces(ctx, &ateapipb.ListAtespacesRequest{Options: &ateapipb.ListOptions{PageSize: c.PageSize, PageToken: token}})
 		if err != nil {
 			return "", fmt.Errorf("listing atespaces: %w", explain(err))
 		}
@@ -195,7 +195,7 @@ func (c *Client) ListAtespaces(ctx context.Context) ([]*ateapipb.Atespace, error
 func (c *Client) ListActors(ctx context.Context, atespace string) ([]*ateapipb.Actor, error) {
 	var out []*ateapipb.Actor
 	err := paginate(func(token string) (string, error) {
-		resp, err := c.api.ListActors(ctx, &ateapipb.ListActorsRequest{Atespace: atespace, PageSize: c.PageSize, PageToken: token})
+		resp, err := c.api.ListActors(ctx, &ateapipb.ListActorsRequest{Atespace: atespace, Options: &ateapipb.ListOptions{PageSize: c.PageSize, PageToken: token}})
 		if err != nil {
 			return "", fmt.Errorf("listing actors in %s: %w", atespace, explain(err))
 		}
@@ -219,7 +219,7 @@ func (c *Client) GetActor(ctx context.Context, atespace, name string) (*ateapipb
 func (c *Client) ListWorkers(ctx context.Context) ([]*ateapipb.Worker, error) {
 	var out []*ateapipb.Worker
 	err := paginate(func(token string) (string, error) {
-		resp, err := c.api.ListWorkers(ctx, &ateapipb.ListWorkersRequest{PageSize: c.PageSize, PageToken: token})
+		resp, err := c.api.ListWorkers(ctx, &ateapipb.ListWorkersRequest{Options: &ateapipb.ListOptions{PageSize: c.PageSize, PageToken: token}})
 		if err != nil {
 			return "", fmt.Errorf("listing workers: %w", explain(err))
 		}
@@ -234,7 +234,7 @@ func (c *Client) ListWorkerActorAssignments(ctx context.Context, worker string) 
 	var out []*ateapipb.ActorAssignment
 	err := paginate(func(token string) (string, error) {
 		resp, err := c.api.ListWorkerActorAssignments(ctx, &ateapipb.ListWorkerActorAssignmentsRequest{
-			Worker: &ateapipb.ObjectRef{Name: worker}, PageSize: c.PageSize, PageToken: token,
+			Worker: &ateapipb.ObjectRef{Name: worker}, Options: &ateapipb.ListOptions{PageSize: c.PageSize, PageToken: token},
 		})
 		if err != nil {
 			return "", fmt.Errorf("listing assignments of worker %s: %w", worker, explain(err))

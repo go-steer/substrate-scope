@@ -37,6 +37,68 @@ func ActorState(s ateapipb.ActorState) string {
 	return strings.TrimPrefix(s.String(), "ACTOR_STATE_")
 }
 
+// agentState is the model's state for an actor. Substrate v0.5 dropped
+// ACTOR_STATE_PAUSING and ACTOR_STATE_PAUSED (a pause is now a suspend that
+// keeps a node-local snapshot), so they are derived the way the API server
+// itself tells a pause from a suspend (controlapi/snapshot_helpers.go at
+// v0.5.0): PAUSED is SUSPENDED with a latest snapshot that is node-local and
+// has no durable copy; PAUSING is SUSPENDING with a latest snapshot that has
+// neither a locality nor a durable copy yet (a suspend's has a pending
+// durable copy).
+func agentState(st *ateapipb.ActorStatus) string {
+	latest := latestSnapshot(st)
+	switch st.GetState() {
+	case ateapipb.ActorState_ACTOR_STATE_SUSPENDED:
+		if latest.GetLocality() != "" && latest.GetDurableSnapshot() == nil {
+			return model.StatePaused
+		}
+	case ateapipb.ActorState_ACTOR_STATE_SUSPENDING:
+		if latest != nil && latest.GetLocality() == "" && latest.GetDurableSnapshot() == nil {
+			return model.StatePausing
+		}
+	}
+	return ActorState(st.GetState())
+}
+
+// latestSnapshot returns the snapshot at the actor's last assigned
+// generation, nil if it has none.
+func latestSnapshot(st *ateapipb.ActorStatus) *ateapipb.Snapshot {
+	for _, s := range st.GetSnapshots() {
+		if s.GetGeneration() == st.GetLastAssignedGeneration() {
+			return s
+		}
+	}
+	return nil
+}
+
+// latestCompletedDurable returns the highest-generation snapshot with a
+// completed durable copy (the one a suspended actor resumes from), nil if
+// there is none.
+func latestCompletedDurable(st *ateapipb.ActorStatus) *ateapipb.Snapshot {
+	var out *ateapipb.Snapshot
+	for _, s := range st.GetSnapshots() {
+		if s.GetDurableSnapshot().GetStatus() == ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED &&
+			(out == nil || s.GetGeneration() >= out.GetGeneration()) {
+			out = s
+		}
+	}
+	return out
+}
+
+// snapshotInProgress reports whether the actor's latest snapshot is still
+// being taken: its durable copy is pending, or it is a local checkpoint not
+// captured yet (no locality and no durable copy).
+func snapshotInProgress(st *ateapipb.ActorStatus) bool {
+	latest := latestSnapshot(st)
+	if latest == nil {
+		return false
+	}
+	if d := latest.GetDurableSnapshot(); d != nil {
+		return d.GetStatus() == ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING
+	}
+	return latest.GetLocality() == ""
+}
+
 // ToAgent converts a Substrate actor.
 func ToAgent(a *ateapipb.Actor) model.Agent {
 	md := a.GetMetadata()
@@ -48,9 +110,9 @@ func ToAgent(a *ateapipb.Actor) model.Agent {
 		Version:            md.GetVersion(),
 		CreateTime:         ts(md.GetCreateTime()),
 		UpdateTime:         ts(md.GetUpdateTime()),
-		State:              ActorState(st.GetState()),
-		SnapshotURI:        st.GetExternalSnapshot().GetSnapshotUri(),
-		SnapshotInProgress: st.GetInProgressSnapshotUri() != "" || st.GetInProgressLocalSnapshotName() != "",
+		State:              agentState(st),
+		SnapshotURI:        latestCompletedDurable(st).GetDurableSnapshot().GetObject().GetSnapshotUri(),
+		SnapshotInProgress: snapshotInProgress(st),
 	}
 	if t := a.GetActorTemplate(); t != nil {
 		out.Template = model.Key(t.GetAtespace(), t.GetName())
