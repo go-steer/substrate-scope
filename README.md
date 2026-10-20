@@ -86,7 +86,7 @@ make deploy        # apply deploy/ by hand with the latest main image (by digest
 make push          # build and push a local tree; then make deploy IMAGE_REF=<printed ref>
 ```
 
-Every merge to main is built and deployed by CI: the image job pushes `IMAGE:<sha>` and `IMAGE:main`, then the deploy job applies `deploy/substrate-scope.yaml` to agent-substrate with that exact digest and waits for the rollout. Each run's summary says what it deployed. The digest in the file is only where a new cluster starts. CI acts as the `substrate-scope-image` Google service account through workload identity federation, accepted only for this repo's main; on the cluster it may only touch the `substrate-scope` namespace (`deploy/ci-rbac.yaml`, applied once by hand, with `roles/container.clusterViewer` on the project).
+Every merge to main is built by CI: the image job pushes `IMAGE:<sha>` and `IMAGE:main`. Deploying to agent-substrate is [shipmind](https://github.com/go-steer/shipmind)'s job: it pins a substrate-scope commit in its `versions.yaml`, builds the image from that commit, and deploys it with the rest of the platform. To ship a change there, move that pin. `make deploy` still applies `deploy/` by hand to a cluster of your own.
 
 `dev/run-local` port-forwards Substrate's API server, ax-server and the router, mints a short-lived token for the `substrate-scope` service account and fetches the CA bundle into `.dev/` (git-ignored).
 
