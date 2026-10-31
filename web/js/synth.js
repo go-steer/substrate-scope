@@ -225,22 +225,30 @@ export function syntheticSnapshot(n, seed = 7, opts = {}) {
   return { cluster: `synthetic-${n}`, source: 'synthetic', seq: 1, features: { attach: true, mastWeb: true, raw: true }, sources: [], atespaces, agents, workers };
 }
 
+// The ax task as the collector reports it: phase and Ready follow the actor
+// (ax derives them on every read; the collector drops Ready's time), and the
+// fork's AutoSuspended says why ax suspended it or that a request woke it.
 function syntheticTask(state, at) {
   const time = new Date(at).toISOString();
+  const phase = { RUNNING: 'Running', RESUMING: 'Resuming', SUSPENDING: 'Suspending', CRASHED: 'Failed' }[state] || 'Suspended';
   const ready = {
-    RUNNING: { status: 'True', reason: 'ResumedByRequest' },
-    CRASHED: { status: 'False', reason: 'Crashed', message: 'runner exited with code 137' },
-    RESUMING: { status: 'False', reason: 'Resuming' },
-  }[state] || { status: 'False', reason: 'IdleSuspended', message: 'idle for 10m0s' };
+    RUNNING: { status: 'True', reason: 'TaskRunning', message: 'Task is running and its workspace is ready' },
+    CRASHED: { status: 'False', reason: 'Failed', message: 'runner exited with code 137' },
+  }[state] || { status: 'False', reason: phase, message: `Actor is ${state.toLowerCase()}` };
+  const auto =
+    state === 'RUNNING'
+      ? { status: 'False', reason: 'ResumedByRequest', message: 'Agent Substrate resumed the task to deliver a request' }
+      : { status: 'True', reason: 'IdleSuspended', message: 'No requests for 10m0s; suspended because spec.idle.suspendAfter is 10m.' };
   return {
-    phase: state === 'RUNNING' ? 'Running' : state === 'CRASHED' ? 'Failed' : 'Suspended',
+    phase,
     idleSuspendAfter: '10m',
     image: 'us-docker.pkg.dev/example/agents/runner@sha256:4f9c2a7d1e0b8c6a5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c',
     httpPort: 8080,
-    workspaces: ['repo'],
+    workspace: 'repo',
     conditions: [
-      { type: 'Ready', ...ready, lastTransitionTime: time },
-      { type: 'Scheduled', status: 'True', reason: 'Placed', lastTransitionTime: time },
+      { type: 'Ready', ...ready },
+      { type: 'WorkspaceReady', status: 'True', reason: 'SetupComplete', updateTime: time },
+      { type: 'AutoSuspended', ...auto, updateTime: time },
     ],
   };
 }
@@ -274,10 +282,7 @@ export function syntheticRaw(a, workers) {
   const d = syntheticDetail(a, workers);
   if (!d) return null;
   const ag = d.agent;
-  // Substrate v0.5 has no PAUSING/PAUSED states: the collector derives them
-  // from SUSPENDING/SUSPENDED and the latest snapshot.
-  const apiState = { PAUSING: 'SUSPENDING', PAUSED: 'SUSPENDED' }[ag.state] || ag.state;
-  const status = { state: `ACTOR_STATE_${apiState}` };
+  const status = { state: `ACTOR_STATE_${ag.state}` };
   if (ag.worker) {
     status.workerAssignment = {
       worker: { name: ag.worker },
@@ -296,7 +301,7 @@ export function syntheticRaw(a, workers) {
         generation: 42,
         owner: 'SNAPSHOT_OWNER_ACTOR',
         fidelity: 'SNAPSHOT_FIDELITY_MEMORY',
-        durableSnapshot: { status: 'SNAPSHOT_STORAGE_STATUS_COMPLETED', object: { snapshotUri: ag.snapshotURI } },
+        durableSnapshot: { state: 'SNAPSHOT_STORAGE_STATE_COMPLETED', object: { snapshotUri: ag.snapshotURI } },
       },
     ];
     status.lastAssignedGeneration = 42;
@@ -323,7 +328,7 @@ export function syntheticRaw(a, workers) {
       object: {
         apiVersion: 'ax.dev/v1alpha1',
         kind: 'Task',
-        metadata: { name: ag.name, atespace: ag.atespace, creationTimestamp: ag.stateSince },
+        metadata: { name: ag.name, atespace: ag.atespace, createTime: ag.stateSince },
         spec: {
           image: t.image,
           env: [
@@ -331,14 +336,14 @@ export function syntheticRaw(a, workers) {
             { name: 'LOG_LEVEL', value: '<redacted>' },
           ],
           resources: { requests: { cpu: '500m', memory: '1Gi' } },
-          workspaces: (t.workspaces || []).map((w) => ({ name: w, path: `/workspace/${w}` })),
+          workspace: t.workspace ? { name: t.workspace } : undefined,
           http: { port: t.httpPort },
           idle: { suspendAfter: t.idleSuspendAfter },
         },
         status: { phase: t.phase, id: ag.uid, actor: ag.name, conditions: t.conditions },
       },
     });
-    for (const w of t.workspaces || []) {
+    for (const w of t.workspace ? [t.workspace] : []) {
       objects.push({
         section: 'task',
         kind: 'Workspace',

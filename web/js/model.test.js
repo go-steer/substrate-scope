@@ -14,7 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Model, stateClass, makeFilter } from './model.js';
+import { Model, stateClass, makeFilter, phaseReason } from './model.js';
 import { describe } from './feed.js';
 
 const snap = {
@@ -41,10 +41,9 @@ test('applyEvents follows sequence numbers and rejects gaps', () => {
 test('state classes and filters', () => {
   assert.equal(stateClass('RUNNING'), 'running');
   assert.equal(stateClass('SUSPENDING'), 'transition');
-  // PAUSING and PAUSED are derived by the collector (Substrate v0.5 dropped
-  // them); REVERTING is v0.5's crash-recovery state.
-  assert.equal(stateClass('PAUSING'), 'transition');
-  assert.equal(stateClass('PAUSED'), 'suspended');
+  // REVERTING is the crash-recovery state. PAUSING and PAUSED are gone
+  // (Substrate v0.5 dropped them, v1.0 removed PauseActor).
+  assert.equal(stateClass('PAUSED'), 'pending');
   assert.equal(stateClass('REVERTING'), 'transition');
   assert.equal(stateClass('CRASHED'), 'crashed');
   assert.equal(stateClass('UNSPECIFIED'), 'pending');
@@ -62,4 +61,15 @@ test('feed prefers the meaningful event over the raw state change', () => {
   ]);
   assert.equal(lines.length, 1);
   assert.match(lines[0].text, /woke by a request/);
+});
+
+test('phase reason: AutoSuspended while True, else Ready', () => {
+  const cond = (type, status, reason) => ({ type, status, reason });
+  assert.equal(phaseReason({ conditions: [cond('Ready', 'False', 'Suspended'), cond('AutoSuspended', 'True', 'IdleSuspended')] }), 'IdleSuspended');
+  assert.equal(phaseReason({ conditions: [cond('AutoSuspended', 'True', 'CompletedSuspended'), cond('Ready', 'False', 'Suspended')] }), 'CompletedSuspended');
+  // Woken again: Ready says what it is now.
+  assert.equal(phaseReason({ conditions: [cond('Ready', 'True', 'TaskRunning'), cond('AutoSuspended', 'False', 'ResumedByRequest')] }), 'TaskRunning');
+  assert.equal(phaseReason({ conditions: [cond('Ready', 'Unknown', 'SubstrateUnavailable')] }), 'SubstrateUnavailable');
+  assert.equal(phaseReason({}), '');
+  assert.equal(phaseReason(undefined), '');
 });

@@ -16,10 +16,10 @@
 
 import { esc } from './format.js';
 
+// Reasons from the ax task's AutoSuspended condition (ax fork).
 const REASON_TEXT = {
   IdleSuspended: 'idle',
   CompletedSuspended: 'command finished',
-  ActorSuspended: 'outside ax',
   ResumedByRequest: 'by a request',
 };
 

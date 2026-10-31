@@ -29,7 +29,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ateapi "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -40,13 +40,13 @@ import (
 // DefaultPageSize is the page size for list calls.
 const DefaultPageSize = 500
 
-// readAPI is the subset of ateapipb.ControlClient the collector may use.
+// readAPI is the subset of ateapi.ControlClient the collector may use.
 type readAPI interface {
-	ListAtespaces(ctx context.Context, in *ateapipb.ListAtespacesRequest, opts ...grpc.CallOption) (*ateapipb.ListAtespacesResponse, error)
-	ListActors(ctx context.Context, in *ateapipb.ListActorsRequest, opts ...grpc.CallOption) (*ateapipb.ListActorsResponse, error)
-	GetActor(ctx context.Context, in *ateapipb.GetActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error)
-	ListWorkers(ctx context.Context, in *ateapipb.ListWorkersRequest, opts ...grpc.CallOption) (*ateapipb.ListWorkersResponse, error)
-	ListWorkerActorAssignments(ctx context.Context, in *ateapipb.ListWorkerActorAssignmentsRequest, opts ...grpc.CallOption) (*ateapipb.ListWorkerActorAssignmentsResponse, error)
+	ListAtespaces(ctx context.Context, in *ateapi.ListAtespacesRequest, opts ...grpc.CallOption) (*ateapi.ListAtespacesResponse, error)
+	ListActors(ctx context.Context, in *ateapi.ListActorsRequest, opts ...grpc.CallOption) (*ateapi.ListActorsResponse, error)
+	GetActor(ctx context.Context, in *ateapi.GetActorRequest, opts ...grpc.CallOption) (*ateapi.Actor, error)
+	ListWorkers(ctx context.Context, in *ateapi.ListWorkersRequest, opts ...grpc.CallOption) (*ateapi.ListWorkersResponse, error)
+	ListWorkerActorAssignments(ctx context.Context, in *ateapi.ListWorkerActorAssignmentsRequest, opts ...grpc.CallOption) (*ateapi.ListWorkerActorAssignmentsResponse, error)
 }
 
 // Options configures the connection, the same way ax-server connects.
@@ -128,7 +128,7 @@ func Dial(o Options) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connecting to Substrate at %s: %w", o.Target, err)
 	}
-	return &Client{conn: conn, api: ateapipb.NewControlClient(conn), PageSize: DefaultPageSize}, nil
+	return &Client{conn: conn, api: ateapi.NewControlClient(conn), PageSize: DefaultPageSize}, nil
 }
 
 // newClient wraps an existing read API (tests).
@@ -142,13 +142,12 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
-// explain adds what to do to a PermissionDenied error. Substrate v0.4 checks
-// ListAtespaces, ListActors and GetActor when its API server runs with
-// --experimental-enable-authz; the collector then needs the global viewer
-// role.
+// explain adds what to do to a PermissionDenied error. Substrate v1.0
+// always enforces authorization and checks every RPC the collector makes;
+// the global viewer role covers them all.
 func explain(err error) error {
 	if status.Code(err) == codes.PermissionDenied {
-		return fmt.Errorf("%w (Substrate enforces authorization: grant the collector's service account the global viewer role, see \"Authorization\" in docs/design.md)", err)
+		return fmt.Errorf("%w (Substrate enforces authorization: grant user:system:serviceaccount:<namespace>:<serviceaccount> the global viewer role, see \"Authorization\" in docs/design.md)", err)
 	}
 	return err
 }
@@ -178,10 +177,10 @@ func paginate(fetch func(token string) (next string, err error)) error {
 }
 
 // ListAtespaces returns every atespace.
-func (c *Client) ListAtespaces(ctx context.Context) ([]*ateapipb.Atespace, error) {
-	var out []*ateapipb.Atespace
+func (c *Client) ListAtespaces(ctx context.Context) ([]*ateapi.Atespace, error) {
+	var out []*ateapi.Atespace
 	err := paginate(func(token string) (string, error) {
-		resp, err := c.api.ListAtespaces(ctx, &ateapipb.ListAtespacesRequest{Options: &ateapipb.ListOptions{PageSize: c.PageSize, PageToken: token}})
+		resp, err := c.api.ListAtespaces(ctx, &ateapi.ListAtespacesRequest{Options: &ateapi.ListOptions{PageSize: c.PageSize, PageToken: token}})
 		if err != nil {
 			return "", fmt.Errorf("listing atespaces: %w", explain(err))
 		}
@@ -192,10 +191,10 @@ func (c *Client) ListAtespaces(ctx context.Context) ([]*ateapipb.Atespace, error
 }
 
 // ListActors returns every actor in an atespace.
-func (c *Client) ListActors(ctx context.Context, atespace string) ([]*ateapipb.Actor, error) {
-	var out []*ateapipb.Actor
+func (c *Client) ListActors(ctx context.Context, atespace string) ([]*ateapi.Actor, error) {
+	var out []*ateapi.Actor
 	err := paginate(func(token string) (string, error) {
-		resp, err := c.api.ListActors(ctx, &ateapipb.ListActorsRequest{Atespace: atespace, Options: &ateapipb.ListOptions{PageSize: c.PageSize, PageToken: token}})
+		resp, err := c.api.ListActors(ctx, &ateapi.ListActorsRequest{Atespace: atespace, Options: &ateapi.ListOptions{PageSize: c.PageSize, PageToken: token}})
 		if err != nil {
 			return "", fmt.Errorf("listing actors in %s: %w", atespace, explain(err))
 		}
@@ -207,8 +206,8 @@ func (c *Client) ListActors(ctx context.Context, atespace string) ([]*ateapipb.A
 
 // GetActor returns one actor. Like the list calls it is answered from
 // Substrate's database and does not wake the actor.
-func (c *Client) GetActor(ctx context.Context, atespace, name string) (*ateapipb.Actor, error) {
-	a, err := c.api.GetActor(ctx, &ateapipb.GetActorRequest{Actor: &ateapipb.ObjectRef{Atespace: atespace, Name: name}})
+func (c *Client) GetActor(ctx context.Context, atespace, name string) (*ateapi.Actor, error) {
+	a, err := c.api.GetActor(ctx, &ateapi.GetActorRequest{Actor: &ateapi.ObjectRef{Atespace: atespace, Name: name}})
 	if err != nil {
 		return nil, fmt.Errorf("getting actor %s/%s: %w", atespace, name, explain(err))
 	}
@@ -216,10 +215,10 @@ func (c *Client) GetActor(ctx context.Context, atespace, name string) (*ateapipb
 }
 
 // ListWorkers returns every worker.
-func (c *Client) ListWorkers(ctx context.Context) ([]*ateapipb.Worker, error) {
-	var out []*ateapipb.Worker
+func (c *Client) ListWorkers(ctx context.Context) ([]*ateapi.Worker, error) {
+	var out []*ateapi.Worker
 	err := paginate(func(token string) (string, error) {
-		resp, err := c.api.ListWorkers(ctx, &ateapipb.ListWorkersRequest{Options: &ateapipb.ListOptions{PageSize: c.PageSize, PageToken: token}})
+		resp, err := c.api.ListWorkers(ctx, &ateapi.ListWorkersRequest{Options: &ateapi.ListOptions{PageSize: c.PageSize, PageToken: token}})
 		if err != nil {
 			return "", fmt.Errorf("listing workers: %w", explain(err))
 		}
@@ -230,11 +229,11 @@ func (c *Client) ListWorkers(ctx context.Context) ([]*ateapipb.Worker, error) {
 }
 
 // ListWorkerActorAssignments returns the actors assigned to a worker.
-func (c *Client) ListWorkerActorAssignments(ctx context.Context, worker string) ([]*ateapipb.ActorAssignment, error) {
-	var out []*ateapipb.ActorAssignment
+func (c *Client) ListWorkerActorAssignments(ctx context.Context, worker string) ([]*ateapi.ActorAssignment, error) {
+	var out []*ateapi.ActorAssignment
 	err := paginate(func(token string) (string, error) {
-		resp, err := c.api.ListWorkerActorAssignments(ctx, &ateapipb.ListWorkerActorAssignmentsRequest{
-			Worker: &ateapipb.ObjectRef{Name: worker}, Options: &ateapipb.ListOptions{PageSize: c.PageSize, PageToken: token},
+		resp, err := c.api.ListWorkerActorAssignments(ctx, &ateapi.ListWorkerActorAssignmentsRequest{
+			Worker: &ateapi.ObjectRef{Name: worker}, Options: &ateapi.ListOptions{PageSize: c.PageSize, PageToken: token},
 		})
 		if err != nil {
 			return "", fmt.Errorf("listing assignments of worker %s: %w", worker, explain(err))

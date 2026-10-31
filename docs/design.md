@@ -56,7 +56,7 @@ The default layout separates the agent plane from the worker plane, so "which ag
 - **Moving the decks** (see Interaction below for every control): each deck can be slid in its plane and raised or lowered, alone or with the other one. Grab a deck by its rim (a band around the slab lights up under the pointer, with a move cursor) or hold Option/Alt and drag anywhere on it; the point grabbed stays under the pointer. Holding Shift while dragging changes the deck's height instead, which is the gap between the decks, clamped between 6 units (they never touch) and four times the planned gap. The chain button in the header (or Shift+L) links the decks (default: dragging either moves both, keeping their relative offset) or unlinks them (each moves alone); height always moves just the deck grabbed, since lifting both together changes nothing you can see. The reset button (or `r`) eases the decks back to the planned arrangement and frames the camera. Offsets and the link state are remembered (localStorage). Beams, ribbons, pool and pad labels, the deck names, hover, picking and the far-tile tooltips follow live: the beams' and ribbons' worker ends are in the worker deck's coordinates and placed by a uniform, so a move rewrites no instance. The scene's frame is the agent deck's: moving the agent deck moves the camera, the sea grid and the stars the other way instead, so picking, labels and the level of detail never need its offset (`applyDeckOffsets` in `scene.js`); the worker deck sits at its offset relative to it. The offset math (moves, linking, clamping, easing, persistence and which deck or rim a ray hits) is pure, in `decks.js`, and unit tested.
 - **Combined for comparison:** `?layout=combined` (or the header toggle) is the single island. Switching rebuilds the plan and disposes the other layout's resources (deck ground, beams, ribbons, pool tiles). In decks the "group by worker" toggle is hidden: the worker deck is the worker view.
 
-Clicking an agent opens a side panel: Substrate state, worker, template, snapshot; ax phase, conditions and reasons (`IdleSuspended`, `ResumedByRequest`, `CompletedSuspended`), idle policy and current idle time; and, for mast and core-agent agents, its sessions and an "Open in mast-web" button.
+Clicking an agent opens a side panel: Substrate state, worker, template, snapshot; ax phase, conditions and reasons (`IdleSuspended`, `CompletedSuspended` and `ResumedByRequest` from the fork's `AutoSuspended` condition; Ready's `SubstrateUnavailable` and `ActorNotFound` when ax can't read or find the actor), idle policy and current idle time; and, for mast and core-agent agents, its sessions and an "Open in mast-web" button.
 
 The live event feed is a collapsible panel on the left, newest on top, one color and icon per kind of event; clicking an event selects the agent and flies to it.
 
@@ -78,9 +78,9 @@ Search and filters (atespace, state, name prefix such as `lookout-`) dim everyth
 
 | Source | Calls | Gives |
 |---|---|---|
-| Substrate control API (`api.ate-system.svc:443`, gRPC, TLS; v0.5.0 or later) | `ListAtespaces`, `ListActors` (per atespace, paginated), `ListWorkers`, `ListWorkerActorAssignments`; `GetActor` right before reading a runner's status | every actor, its state, worker (and its IPs), template, snapshots, crash info, the node holding a paused actor's snapshot; every worker, its node, IPs, epoch, actor slots and CPU/memory capacity and allocation |
+| Substrate control API (`api.ate-system.svc:443`, gRPC, TLS; v1.0.0-rc.1 or later) | `ListAtespaces`, `ListActors` (per atespace, paginated), `ListWorkers`, `ListWorkerActorAssignments`; `GetActor` right before reading a runner's status | every actor, its state, worker (and its IPs), template, snapshots, crash info, the node holding a suspended actor's local snapshot; every worker, its node, IPs, epoch, actor slots and CPU/memory capacity and allocation |
 | ax API (`ax-server.ax-system.svc:8080`, gRPC) | list tasks per atespace | task phase, conditions, idle policy, which actors are ax tasks |
-| ax runner status, via the atenet router with `ate-target-actor` | `GET /metadata/v1alpha1/ax/status`, **running actors only**, and only for the agents in view or selected | idle seconds, in-flight requests, busy, exit |
+| ax runner status, via the atenet router (HTTPS, mTLS) with `ate-target-actor` | `GET /metadata/v1alpha1/ax/status`, **running actors only**, and only for the agents in view or selected | idle seconds, in-flight requests, busy, exit |
 | Agent session API, via the router | `GET /sessions`, **running actors only**, on demand | session list (listing does not count as activity in mast) |
 
 Substrate has no watch API, so the collector polls (default every 2s for actors, 10s for workers and tasks), diffs against the previous picture, and turns the difference into events. Per-agent detail is polled more slowly and only on demand.
@@ -88,9 +88,9 @@ Substrate has no watch API, so the collector polls (default every 2s for actors,
 ### Events and API
 
 - `GET /api/snapshot`: the whole picture (clusters, atespaces, agents, workers) with a sequence number.
-- `GET /api/stream` (WebSocket): the snapshot, then events with increasing sequence numbers: `agent_added`, `agent_removed`, `agent_state` (from/to), `agent_woke` (suspended → running without an explicit resume, ax reason `ResumedByRequest`), `agent_suspended` (with reason), `agent_crashed`, `worker_assignment`, `task_updated`. A client that falls behind gets a fresh snapshot.
+- `GET /api/stream` (WebSocket): the snapshot, then events with increasing sequence numbers: `agent_added`, `agent_removed`, `agent_state` (from/to), `agent_woke` (suspended → running without an explicit resume, ax reason `ResumedByRequest`), `agent_suspended` (with reason), `agent_crashed`, `worker_assignment`, `task_updated` (with the reason that changed: AutoSuspended's, else Ready's). A client that falls behind gets a fresh snapshot.
 - `GET /api/agents/{atespace}/{name}`: details for the side panel.
-- `GET /api/agents/{atespace}/{name}/raw`: the API objects behind the agent for the panel's YAML view: its Substrate Actor and, for an ax task, the Task and its Workspaces, as protojson. Read RPCs only (`GetActor`, `GetTask`, `GetWorkspace`), so it never wakes the agent. The UI has no login, so the collector redacts before anything leaves it (`internal/raw`): `env[].value`, Workspace `files[].content` (replaced by its size), string values under secret-looking keys (token, secret, password, credential, API key, …), args under `mcp`, and credentials embedded in URLs.
+- `GET /api/agents/{atespace}/{name}/raw`: the API objects behind the agent for the panel's YAML view: its Substrate Actor and, for an ax task, the Task and its Workspace, as protojson. Read RPCs only (`GetActor`, `GetTask`, `GetWorkspace`), so it never wakes the agent. The UI has no login, so the collector redacts before anything leaves it (`internal/raw`): `env[].value`, Workspace `files[].content` (replaced by its size), string values under secret-looking keys (token, secret, password, credential, API key, …), args under `mcp`, and credentials embedded in URLs.
 - `/api/agents/{atespace}/{name}/attach/...`: optional reverse proxy to the agent's session API through the router (adds `ate-target-actor`, and the agent bearer token from a Secret). Off unless configured; requests through it can wake the agent, so it refuses unless the agent is running or the request carries `scope_wake=1`.
 - `/mast-web/a/{atespace}/{name}/...` and `GET /config`: mast-web attached to one agent (see Sessions in mast-web).
 - The collector serves the front end itself (`go:embed`), so one container is the whole thing.
@@ -99,74 +99,70 @@ Substrate has no watch API, so the collector polls (default every 2s for actors,
 
 The collector runs as its own service account and authenticates to Substrate with a projected token for audience `api.ate-system.svc`, trusting the servicedns CA bundle (the same mechanism ax-server uses).
 
-It targets **Substrate v0.5.0** (the Go module is pinned to v0.5.0, and the authorization notes below are v0.5 behavior). Older API servers are not supported: v0.5 moved list paging into `ListOptions` and replaced the actor's snapshot fields, so against a v0.4 server lists fail once they need a second page (the page token is dropped), snapshot details are empty, and paused actors show an unknown state.
+It targets **Substrate v1.0.0-rc.1** (Go module `go.ate.dev/substrate`, API package `api/ateapi/v1`). Older API servers are not supported: v1.0 moved the proto package from `ateapi` to `substrate.ateapi.v1`, so every gRPC method path changed (`/substrate.ateapi.v1.Control/ListActors`) and a v0.x server answers each call with Unimplemented, and the other way round. Clusters move to v1.0 by reinstalling, so there is no mixed period to bridge.
 
-Substrate v0.5 (Actor Lifecycle v2) dropped the `PAUSING` and `PAUSED` actor states and the `external_snapshot`/`in_progress_*` fields. An actor now carries a list of `snapshots` and its `last_assigned_generation`, and a pause is a suspend that keeps a node-local snapshot. The collector derives the old states the way the API server tells a pause from a suspend (`controlapi/snapshot_helpers.go`), so the model and UI keep them: an actor is **PAUSED** when it is SUSPENDED and the snapshot at its latest generation has a `locality` and no durable copy, and **PAUSING** when it is SUSPENDING and that snapshot has neither yet (a suspend's has a pending durable copy). `snapshotURI` is the highest-generation snapshot whose durable copy is COMPLETED; `snapshotInProgress` is set while the latest snapshot's durable copy is PENDING or it is a local checkpoint not yet captured. `REVERTING` (back from CRASHED to SUSPENDED) is passed through as a transition state.
+What the v1.0 API changed for the collector:
 
-From v0.4 it also shows each worker's IPs (`Worker.ips`, at most one per IP family) and epoch, the IPs of the worker hosting an actor (`WorkerAssignment.worker_pod_ips`; the first non-empty one is `workerIP`), and the node a PAUSED actor's local snapshot is on (`ActorStatus.assigned_node`).
+- **Actor states.** v0.5 dropped `PAUSING` and `PAUSED`, and v1.0 removed `PauseActor`. The collector used to derive the two from the snapshot list; it now passes Substrate's state through unchanged (`RESUMING`, `RUNNING`, `SUSPENDING`, `SUSPENDED`, `CRASHED`, `DELETING`, `REVERTING`). A suspended actor can still be attached to a node (`assignedNode`): v1.0 suspends asynchronously by default and keeps the snapshot on the node at least until the upload is durable.
+- **Snapshots.** `SnapshotStorage.status` became `state` (`SnapshotStorageState`, `PENDING` and `COMPLETED`). `snapshotURI` is the highest-generation snapshot whose durable copy is COMPLETED; `snapshotInProgress` is set while the latest snapshot's durable copy is PENDING (which, with asynchronous suspends, includes the upload that continues after the actor is SUSPENDED) or it has neither a locality nor a durable copy yet.
+- **Workers.** IPs, the epoch and the sandbox class moved into `WorkerStatus`: `status.ips`, `status.registered_epoch` (the epoch of the worker process that registered last; `observed_epoch` trails it until the control plane has crashed the actors placed before a restart) and `status.sandbox_classes[0].sandbox_class` (empty until the worker reports its runtimes).
+- **Resources.** `WorkerResources` carries `cpu_millicores` and `memory_bytes` (int64) instead of a list of Kubernetes quantities. The collector formats them as quantities (`500m`, `2`, `960Mi`), so the UI is unchanged; allocation is `0` when capacity is reported and nothing is booked. v1.0 books every running actor's limits, so allocation is real now (v0.5 workers reported none, because ax tasks declared no limits).
 
-The collector's safety comes from its code: it calls only list and get methods, and tests check it never references a mutating RPC (`TestNeverMutates`, which includes the v0.4 access policy writes) and that its gRPC surface is exactly `ListAtespaces`, `ListActors`, `GetActor`, `ListWorkers` and `ListWorkerActorAssignments` (`TestReadAPIExactSet`).
+The collector's safety comes from its code: it calls only list and get methods, and tests check it never references a mutating RPC (`TestNeverMutates`, which includes the access policy writes) and that its gRPC surface is exactly `ListAtespaces`, `ListActors`, `GetActor`, `ListWorkers` and `ListWorkerActorAssignments` (`TestReadAPIExactSet`). All five still exist in v1.0.
 
 #### Authorization
 
-**Network access.** From v0.5, `ate-system` denies ingress by default, and the API server's NetworkPolicy admits in-cluster clients only from namespaces labeled `ate.dev/api-access=true`. `deploy/namespace.yaml` sets the label on `substrate-scope`. CI applies only `deploy/substrate-scope.yaml`, so label an existing namespace by hand (`kubectl label namespace substrate-scope ate.dev/api-access=true`; harmless on v0.4). Without it the collector's calls time out rather than fail with PermissionDenied. The atenet router's data ports (used for runner status and the attach proxy) admit any source, and ax-server is outside `ate-system`, so nothing else changes.
+**Network access.** `ate-system` denies ingress by default, and the API server's NetworkPolicy admits in-cluster clients only from namespaces labeled `ate.dev/api-access=true`. `deploy/namespace.yaml` sets the label on `substrate-scope`; label an existing namespace by hand (`kubectl label namespace substrate-scope ate.dev/api-access=true`). Without it the collector's calls time out rather than fail with PermissionDenied. The atenet router's ingress ports (443 and 8444) admit any source at the network level, and ax-server is outside `ate-system`.
 
-Substrate v0.4 added OpenFGA-backed authorization to the control API. It is enforced only when the API server runs with `--experimental-enable-authz` (or `ATE_API_EXPERIMENTAL_ENABLE_AUTHZ=true`), which also requires `--authz-bootstrap-owners`: principal IDs that are always global owners. Access policy RPCs are checked even when enforcement is off.
-
-What the collector's calls need when it is on:
+**API authorization is always on in v1.0.** ate-api-server checks every call against an embedded OpenFGA model; there is no switch to turn it off, and an RPC without a rule is denied. What the collector's calls need (Substrate's `docs/guides/authorization.md`, "Checks per RPC"):
 
 | Call | Check | Satisfied by |
 |---|---|---|
-| `ListAtespaces` | `can_list_atespaces` on `global:root` | global viewer |
-| `ListActors` (per atespace) | `can_list_actors` on `atespace:<name>` | atespace viewer, inherited from global viewer |
-| `GetActor` | `can_get` on `actor:<atespace>/<name>` | atespace viewer, inherited from global viewer |
-| `ListWorkers` | `can_list_workers` on `global:root` | global viewer |
-| `ListWorkerActorAssignments` | `can_list_actor_assignments` on `worker:<name>` | global viewer (inherited from `global:root`) |
+| `ListAtespaces` | `can_list_atespaces`, global | global viewer |
+| `ListActors` (per atespace) | `can_list_actors`, the atespace | atespace viewer, inherited from global viewer |
+| `GetActor` | `can_get`, the actor | atespace viewer, inherited from global viewer |
+| `ListWorkers` | `can_list_workers`, global | global viewer |
+| `ListWorkerActorAssignments` | `can_list_actor_assignments`, the worker | global viewer |
 
-(v0.4 did not check the two worker calls; v0.5 denies every RPC without an authz rule when enforcement is on, and registers both.)
+So the grant is the **global `viewer`** role. It covers atespaces created later too, because a global role holds in every atespace. Granting `viewer` on single atespaces is not enough: `ListAtespaces` and the worker calls then fail.
 
-So the grant is the **global `viewer`** role (global roles are `owner` and `viewer`; atespaces also have `editor`). It covers atespaces created later too, because every atespace inherits viewers from `global:root`. Granting `viewer` on single atespaces works as well, but `ListAtespaces` then fails and the collector sees nothing.
+**Principal ID.** A Kubernetes service account token's principal is `system:serviceaccount:<namespace>:<name>`, so the collector (from `deploy/substrate-scope.yaml`) is `system:serviceaccount:substrate-scope:substrate-scope`, and an access policy member is that ID with a `user:` prefix. A PermissionDenied message shows it with the colons percent-encoded (`user:system%3Aserviceaccount%3Asubstrate-scope%3Asubstrate-scope`). The token's issuer must be one of the API server's JWT providers; `ate-setup` configures the cluster's Kubernetes issuer with audience `api.ate-system.svc`, which is what the collector uses.
 
-**Principal ID.** For a bearer token, Substrate's principal is the token's `sub` claim, verbatim and not qualified by issuer (`apiauthn` + `buildJWTProviders` in `cmd/ateapi`, v0.4.0 and v0.5.0); for a client certificate it is the first URI SAN. A Kubernetes projected service account token has `sub` = `system:serviceaccount:<namespace>:<name>`, so the collector (from `deploy/substrate-scope.yaml`) is `system:serviceaccount:substrate-scope:substrate-scope`, and an access policy member is that ID with a `user:` prefix: `user:system:serviceaccount:substrate-scope:substrate-scope`. (Substrate percent-encodes the colons internally; a PermissionDenied message shows the encoded form, `user:system%3Aserviceaccount%3Asubstrate-scope%3Asubstrate-scope`.) The token's issuer must be one of the API server's `jwtProviders`; `ate-setup` configures the cluster's Kubernetes issuer with audience `api.ate-system.svc`, which is what the collector already uses.
-
-**Granting it.** `kubectl-ate` (v0.4 and v0.5) has no access policy commands, so call the API directly (the API server registers gRPC reflection) as a bootstrap owner. The global policy is a singleton named `default`: create it if it doesn't exist, otherwise update it, which replaces the whole binding list and needs the current `uid` and `version`. Bootstrap owners keep access whatever the policy says.
+**Granting it.** v1.0's `kubectl ate` manages access policies. The global policy is a singleton named `default`, editable by a bootstrap owner (`ATE_API_AUTHZ_BOOTSTRAP_OWNERS`) or a global owner. Create it if there is none; otherwise `update` replaces the whole policy and needs the `uid` and `version` from `get -o yaml`, so add the member to what is there.
 
 ```sh
-# A token for a principal listed in --authz-bootstrap-owners (here a service
-# account ADMIN_NS/ADMIN_SA), and the API server's CA bundle.
-TOKEN=$(kubectl -n ADMIN_NS create token ADMIN_SA --audience api.ate-system.svc --duration 10m)
-kubectl get clustertrustbundles -l podcert.ate.dev/canarying=live \
-  -o jsonpath='{range .items[?(@.spec.signerName=="servicedns.podcert.ate.dev/identity")]}{.spec.trustBundle}{end}' > ca.pem
-kubectl -n ate-system port-forward deploy/ate-api-server 18443:443 &
-ate() { # ate METHOD [JSON]
-  local data=${2:-'{}'}
-  grpcurl -cacert ca.pem -authority api.ate-system.svc -H "authorization: Bearer $TOKEN" \
-    -d "$data" localhost:18443 "ateapi.Control/$1"
-}
+# As a bootstrap or global owner (a token for that principal).
+kubectl ate --token-file owner.token get access-policy --global -o yaml > global.yaml
 
-# Is there a global policy yet? (NotFound until someone creates it.)
-ate GetGlobalAccessPolicy
+# NotFound: there is no global policy yet. Create one with the collector as viewer.
+cat > global.yaml <<'YAML'
+metadata:
+  name: default
+bindings:
+- role: viewer
+  members:
+  - user:system:serviceaccount:substrate-scope:substrate-scope
+YAML
+kubectl ate --token-file owner.token create access-policy --global -f global.yaml
 
-# None yet: create it with the collector as global viewer.
-ate CreateGlobalAccessPolicy '{"access_policy": {
-  "metadata": {"name": "default"},
-  "bindings": [{"role": "viewer", "members": ["user:system:serviceaccount:substrate-scope:substrate-scope"]}]
-}}'
-
-# Already there: send back every existing binding plus the new member, with
-# the uid and version from the Get above.
-ate UpdateGlobalAccessPolicy '{"access_policy": {
-  "metadata": {"name": "default", "uid": "UID", "version": "VERSION"},
-  "bindings": [
-    {"role": "viewer", "members": ["user:system:serviceaccount:substrate-scope:substrate-scope", "...existing viewers"]},
-    {"role": "owner", "members": ["...existing owners"]}
-  ]
-}}'
+# Otherwise: add the member under role viewer in global.yaml (keep uid,
+# version and every other binding), then replace the policy.
+kubectl ate --token-file owner.token update access-policy --global -f global.yaml
 ```
 
 Without the grant, the Substrate source reports an error (the collector adds a hint pointing here to PermissionDenied errors) and no Substrate data comes in.
 
 The collector itself never calls any access policy RPC, not even `GetGlobalAccessPolicy`, so it cannot widen its own access.
+
+#### Router mTLS
+
+Runner status and the attach proxy reach actors through the atenet router. Since Substrate v0.6 its ingress is HTTPS only (`atenet-router.ate-system.svc:443`, plus CONNECT-TLS on 8444, which the collector doesn't use), and it requires a client certificate:
+
+- **Client certificate.** A `podCertificate` projected volume from Substrate's podidentity signer (`signerName: podidentity.podcert.ate.dev/identity`, `keyType: ECDSAP256`, `credentialBundlePath: credential-bundle.pem`), mounted at `/run/podidentity`. The file is a PKCS#8 key followed by the chain, leaf first. The leaf is an X.509-SVID for the pod's service account, `spiffe://cluster.local/ns/substrate-scope/sa/substrate-scope`. It lasts up to 24 hours and the kubelet rewrites it before it expires; the collector re-reads it every 30 seconds and presents the current one on each handshake (`--router-cert-file`).
+- **Allowlist.** The router admits only SPIFFE IDs listed in ate-setup's `ATE_INGRESS_ALLOWED_SPIFFE_IDS` (`--ingress-allowed-spiffe-ids`), matched exactly. Add `spiffe://cluster.local/ns/substrate-scope/sa/substrate-scope`. With the ID missing, the router refuses runner status and attach requests (HTTP 403); the rest of the UI is unaffected. Every listed client can reach every actor; there is no per-atespace scoping at the router.
+- **Server trust.** The router's certificate comes from the servicedns signer and carries only the DNS name `atenet-router.ate-system.svc`. The collector verifies it against the servicedns ClusterTrustBundle (`labelSelector: podcert.ate.dev/canarying: live`, already mounted at `/run/servicedns-ca` for the control API), re-read as it rotates (`--router-ca-file`), and checks that exact name (`--router-server-name`), whatever address it dials. The name is what identifies the router: the servicedns CA issues a certificate to every Service in the cluster.
+
+The client side is go-steer/purser's PKI profile (`mtls.NewCertificateFileSource`, `mtls.NewCertPoolFileSource`, `client.NewPKI`, `client.Transport`); `internal/router` wraps it in `NewTLSTransport`. `--router` is `host:port` for HTTPS (the default, `atenet-router.ate-system.svc.cluster.local:443`); an explicit `http://host:port` dials plain HTTP with no certificate, for a stand-in during development (a real router has no plain-HTTP listener). `--router=` turns runner status and attach off.
 
 ## Simulator
 
@@ -316,7 +312,7 @@ Main-thread cost at 100,000 agents with 1,000 state changes a second (orbiting a
 
 ## Deployment
 
-`deploy/` has plain manifests: namespace `substrate-scope`, service account, deployment (projected Substrate token, CA bundle, ax and router addresses, optional agent-token Secret for the attach proxy), and a ClusterIP service. Access is `kubectl port-forward` for now.
+`deploy/` has plain manifests: namespace `substrate-scope`, service account, deployment (projected Substrate token, CA bundle, podidentity client certificate for the router, ax and router addresses, optional agent-token Secret for the attach proxy), and a ClusterIP service. Access is `kubectl port-forward` for now.
 
 ## Milestones
 
@@ -328,5 +324,5 @@ Main-thread cost at 100,000 agents with 1,000 state changes a second (orbiting a
 ## Open questions
 
 - How often can `ListActors` be polled on a large cluster before it bothers Substrate's API server? Paging and per-atespace polling help; a watch API upstream would be better (add to our Substrate asks if polling becomes a problem).
-- The vendored ax proto (`internal/axapi`) comes from the ax fork's `task-idle-suspend-fix` branch, built against Substrate v0.3. The fork's Substrate v0.4 port (branch `substrate-v0.4` of `mastersingh24/ax`) is in progress; re-copy ax.proto from it and regenerate once it lands. Nothing the collector uses is expected to change, since ax's task API doesn't carry Substrate's worker fields.
-- The router-woke signal: ax records `ResumedByRequest` only on our fork (`task-idle-suspend`). Without it, the collector infers a wake from a state change it didn't see an explicit resume for.
+- The vendored ax proto (`internal/axapi`) comes from the ax fork, tag `substrate-v1-12dbe16` (upstream google/ax f0228f1 plus the fork's patch stack, on Substrate v1.0.0-rc.1). Upstream moved to a single `spec.workspace`, added `spec.config` (field 7), dropped `WatchTask`, and derives the phase and Ready from the actor on every read: phase `Unknown` with Ready reason `SubstrateUnavailable` when Substrate can't be reached, `Failed` with `ActorNotFound` when the actor is gone. Because Ready is rebuilt on each read, its `updateTime` is the read time, so the collector drops it (`ax.ToTask`). The fork's own TaskSpec fields are 100–103; re-copy and regenerate when the fork moves.
+- Why ax suspended a task, and the router-woke signal, come only from our fork's `AutoSuspended` condition: True with `IdleSuspended` or `CompletedSuspended` when ax suspended it, False with `ResumedByRequest` once it sees the task running again. ax only records suspensions it made itself, so a suspend from elsewhere carries no reason (the old `ActorSuspended` reason is gone), and against upstream ax the collector infers a wake from a state change it didn't see an explicit resume for.

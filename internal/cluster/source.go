@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ateapi "go.ate.dev/substrate/api/ateapi/v1"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/go-steer/substrate-scope/internal/collector"
@@ -40,10 +40,10 @@ const (
 
 // SubstrateLister is the part of the Substrate client the pollers use.
 type SubstrateLister interface {
-	ListAtespaces(ctx context.Context) ([]*ateapipb.Atespace, error)
-	ListActors(ctx context.Context, atespace string) ([]*ateapipb.Actor, error)
-	ListWorkers(ctx context.Context) ([]*ateapipb.Worker, error)
-	ListWorkerActorAssignments(ctx context.Context, worker string) ([]*ateapipb.ActorAssignment, error)
+	ListAtespaces(ctx context.Context) ([]*ateapi.Atespace, error)
+	ListActors(ctx context.Context, atespace string) ([]*ateapi.Actor, error)
+	ListWorkers(ctx context.Context) ([]*ateapi.Worker, error)
+	ListWorkerActorAssignments(ctx context.Context, worker string) ([]*ateapi.ActorAssignment, error)
 }
 
 // TaskLister is the part of the ax client the pollers use.

@@ -46,8 +46,8 @@ func Proto(m proto.Message) (any, error) {
 }
 
 // secretKey matches field names whose string values are masked wherever they
-// appear. Numbers and objects under them are kept: usage counts are named
-// promptTokens, and a secretKey is a reference ({name, key}), not a secret.
+// appear. Numbers and objects under them are kept: counts such as
+// maxTokens, and a secretKey is a reference ({name, key}), not a secret.
 var secretKey = regexp.MustCompile(`(?i)(token|secret|password|passwd|credential|api_?key|private_?key|authorization|cookie)`)
 
 // userinfo matches credentials embedded in a URL (https://user:pass@host).

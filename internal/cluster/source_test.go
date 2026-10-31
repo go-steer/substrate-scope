@@ -20,7 +20,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ateapi "go.ate.dev/substrate/api/ateapi/v1"
 
 	"github.com/go-steer/substrate-scope/internal/collector"
 	"github.com/go-steer/substrate-scope/internal/model"
@@ -28,42 +28,42 @@ import (
 
 type fakeSubstrate struct {
 	mu     sync.Mutex
-	states map[string]map[string]ateapipb.ActorState
+	states map[string]map[string]ateapi.ActorState
 	fail   string
 }
 
-func (f *fakeSubstrate) ListAtespaces(context.Context) ([]*ateapipb.Atespace, error) {
+func (f *fakeSubstrate) ListAtespaces(context.Context) ([]*ateapi.Atespace, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []*ateapipb.Atespace
+	var out []*ateapi.Atespace
 	for as := range f.states {
-		out = append(out, &ateapipb.Atespace{Metadata: &ateapipb.ResourceMetadata{Name: as}})
+		out = append(out, &ateapi.Atespace{Metadata: &ateapi.ResourceMetadata{Name: as}})
 	}
 	return out, nil
 }
 
-func (f *fakeSubstrate) ListActors(_ context.Context, as string) ([]*ateapipb.Actor, error) {
+func (f *fakeSubstrate) ListActors(_ context.Context, as string) ([]*ateapi.Actor, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if as == f.fail {
 		return nil, errors.New("unavailable")
 	}
-	var out []*ateapipb.Actor
+	var out []*ateapi.Actor
 	for name, st := range f.states[as] {
-		out = append(out, &ateapipb.Actor{
-			Metadata: &ateapipb.ResourceMetadata{Atespace: as, Name: name},
-			Status:   &ateapipb.ActorStatus{State: st},
+		out = append(out, &ateapi.Actor{
+			Metadata: &ateapi.ResourceMetadata{Atespace: as, Name: name},
+			Status:   &ateapi.ActorStatus{State: st},
 		})
 	}
 	return out, nil
 }
 
-func (f *fakeSubstrate) ListWorkers(context.Context) ([]*ateapipb.Worker, error) {
-	return []*ateapipb.Worker{{Metadata: &ateapipb.ResourceMetadata{Name: "w1"}, WorkerPod: "atelet-1"}}, nil
+func (f *fakeSubstrate) ListWorkers(context.Context) ([]*ateapi.Worker, error) {
+	return []*ateapi.Worker{{Metadata: &ateapi.ResourceMetadata{Name: "w1"}, WorkerPod: "atelet-1"}}, nil
 }
 
-func (f *fakeSubstrate) ListWorkerActorAssignments(_ context.Context, w string) ([]*ateapipb.ActorAssignment, error) {
-	return []*ateapipb.ActorAssignment{{Actor: &ateapipb.ObjectRef{Atespace: "a", Name: "x"}}}, nil
+func (f *fakeSubstrate) ListWorkerActorAssignments(_ context.Context, w string) ([]*ateapi.ActorAssignment, error) {
+	return []*ateapi.ActorAssignment{{Actor: &ateapi.ObjectRef{Atespace: "a", Name: "x"}}}, nil
 }
 
 type fakeAX struct{ seen []string }
@@ -74,9 +74,9 @@ func (f *fakeAX) ListTasks(_ context.Context, as string) (map[string]model.Task,
 }
 
 func TestPollActorsAndKick(t *testing.T) {
-	f := &fakeSubstrate{states: map[string]map[string]ateapipb.ActorState{
-		"a": {"x": ateapipb.ActorState_ACTOR_STATE_RUNNING},
-		"b": {"y": ateapipb.ActorState_ACTOR_STATE_SUSPENDED},
+	f := &fakeSubstrate{states: map[string]map[string]ateapi.ActorState{
+		"a": {"x": ateapi.ActorState_ACTOR_STATE_RUNNING},
+		"b": {"y": ateapi.ActorState_ACTOR_STATE_SUSPENDED},
 	}}
 	s := New(Options{Substrate: f, AX: &fakeAX{}})
 	u := s.PollActors(context.Background())
@@ -95,7 +95,7 @@ func TestPollActorsAndKick(t *testing.T) {
 	default:
 	}
 	f.mu.Lock()
-	f.states["a"]["x"] = ateapipb.ActorState_ACTOR_STATE_SUSPENDING
+	f.states["a"]["x"] = ateapi.ActorState_ACTOR_STATE_SUSPENDING
 	f.mu.Unlock()
 	s.PollActors(context.Background())
 	select {
@@ -106,7 +106,7 @@ func TestPollActorsAndKick(t *testing.T) {
 }
 
 func TestPollActorsFailsWhole(t *testing.T) {
-	f := &fakeSubstrate{states: map[string]map[string]ateapipb.ActorState{"a": {}, "b": {}}, fail: "b"}
+	f := &fakeSubstrate{states: map[string]map[string]ateapi.ActorState{"a": {}, "b": {}}, fail: "b"}
 	u := New(Options{Substrate: f}).PollActors(context.Background())
 	if u.Err == nil || u.Actors != nil {
 		t.Fatalf("expected a failed update, got %+v", u)
@@ -114,7 +114,7 @@ func TestPollActorsFailsWhole(t *testing.T) {
 }
 
 func TestPollWorkersAndTasks(t *testing.T) {
-	f := &fakeSubstrate{states: map[string]map[string]ateapipb.ActorState{"a": {"x": ateapipb.ActorState_ACTOR_STATE_RUNNING}}}
+	f := &fakeSubstrate{states: map[string]map[string]ateapi.ActorState{"a": {"x": ateapi.ActorState_ACTOR_STATE_RUNNING}}}
 	ax := &fakeAX{}
 	s := New(Options{Substrate: f, AX: ax})
 	w := s.PollWorkers(context.Background())

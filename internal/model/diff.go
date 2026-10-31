@@ -40,7 +40,7 @@ func NewWorld() *World {
 // IsSuspended reports whether a state means the actor holds no worker and
 // stays put until something resumes it.
 func IsSuspended(state string) bool {
-	return state == StateSuspended || state == StateSuspending || state == StatePaused || state == StatePausing
+	return state == StateSuspended || state == StateSuspending
 }
 
 // IsAwake reports whether a state means the actor is running or on its way.
@@ -48,22 +48,22 @@ func IsAwake(state string) bool {
 	return state == StateRunning || state == StateResuming
 }
 
-// suspendReasons are the ax Ready reasons that explain a suspension.
+// suspendReasons are the AutoSuspended reasons that explain a suspension.
 var suspendReasons = map[string]bool{
 	ReasonIdleSuspended:      true,
 	ReasonCompletedSuspended: true,
-	ReasonActorSuspended:     true,
 }
 
-// readyReasonSince returns the task's Ready reason if it changed at or after
-// since (a condition with no transition time counts as current). Older
-// reasons describe an earlier suspend or wake and are ignored.
-func readyReasonSince(t *Task, since time.Time) string {
-	c := t.Ready()
-	if c == nil {
+// autoSuspendedSince returns the reason of the task's AutoSuspended
+// condition if it has the given status and changed at or after since (a
+// condition with no update time counts as current). Older ones describe an
+// earlier suspend or wake and are ignored.
+func autoSuspendedSince(t *Task, status string, since time.Time) string {
+	c := t.AutoSuspended()
+	if c == nil || c.Status != status {
 		return ""
 	}
-	if c.LastTransitionTime != nil && !since.IsZero() && c.LastTransitionTime.Before(since.Add(-2*time.Second)) {
+	if c.UpdateTime != nil && !since.IsZero() && c.UpdateTime.Before(since.Add(-2*time.Second)) {
 		return ""
 	}
 	return c.Reason
@@ -135,17 +135,17 @@ func diffAgent(key string, old, a *Agent) []Event {
 			evs = append(evs, ev)
 		case IsSuspended(a.State) && !IsSuspended(old.State):
 			ev := Event{Type: EventAgentSuspended, Key: key, Agent: a, From: old.State}
-			if r := readyReasonSince(a.Task, old.StateSince); suspendReasons[r] {
+			if r := autoSuspendedSince(a.Task, "True", old.StateSince); suspendReasons[r] {
 				ev.Reason = r
 			}
 			evs = append(evs, ev)
 		case IsAwake(a.State) && IsSuspended(old.State):
 			// Nothing in Substrate says who resumed the actor. ax (fork)
-			// records ResumedByRequest when the router did; it may only
-			// show up on a later task poll, as a task_updated with that
-			// reason.
+			// turns AutoSuspended False with ResumedByRequest when the
+			// router woke a task it had suspended; that may only show up
+			// on a later task poll, as a task_updated with that reason.
 			ev := Event{Type: EventAgentWoke, Key: key, Agent: a, From: old.State}
-			if r := readyReasonSince(a.Task, old.StateSince); r == ReasonResumedByRequest {
+			if r := autoSuspendedSince(a.Task, "False", old.StateSince); r == ReasonResumedByRequest {
 				ev.Reason = r
 			}
 			evs = append(evs, ev)
@@ -156,7 +156,11 @@ func diffAgent(key string, old, a *Agent) []Event {
 	}
 	if !reflect.DeepEqual(old.Task, a.Task) {
 		ev := Event{Type: EventTaskUpdated, Key: key, Agent: a, New: old.Task == nil && a.Task != nil}
-		if oldR, newR := old.Task.Ready(), a.Task.Ready(); newR != nil && (oldR == nil || oldR.Reason != newR.Reason) {
+		// The reason is what changed: AutoSuspended first (why ax suspended
+		// it, or that a request woke it), else the Ready reason.
+		if oldA, newA := old.Task.AutoSuspended(), a.Task.AutoSuspended(); newA != nil && (oldA == nil || oldA.Status != newA.Status || oldA.Reason != newA.Reason) {
+			ev.Reason = newA.Reason
+		} else if oldR, newR := old.Task.Ready(), a.Task.Ready(); newR != nil && (oldR == nil || oldR.Reason != newR.Reason) {
 			ev.Reason = newR.Reason
 		}
 		evs = append(evs, ev)

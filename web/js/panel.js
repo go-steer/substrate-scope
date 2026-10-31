@@ -23,22 +23,25 @@
 // agent starts or stops running. Nothing here scrolls the panel.
 //
 // The Substrate and ax sections end in a collapsed "YAML" block with the raw
-// objects behind them (Actor; Task and Workspaces), fetched when a block is
+// objects behind them (Actor; Task and Workspace), fetched when a block is
 // opened. The collector redacts them before they leave it.
 
 import { esc, duration, since, parseGoDuration, workerLabel, clock } from './format.js';
 import { toYAML } from './yaml.js';
 import { cssColor } from './scene.js';
-import { stateClass } from './model.js';
+import { stateClass, phaseReason } from './model.js';
 import { apiBase, mastWebURL, sessionLine, emptySessionsNote, attachError, wakeRetryDelay, WAKE_RETRY_MS } from './sessions.js';
 
+// Reasons on the ax task's conditions: AutoSuspended's (ax fork) and the
+// Ready reasons that mean ax can't see or find the actor.
 const REASON_CLASS = {
   IdleSuspended: 'r-idle',
   CompletedSuspended: 'r-done',
   ResumedByRequest: 'r-woke',
-  ActorSuspended: 'r-ext',
-  TaskSuspended: 'r-ext',
+  SubstrateUnavailable: 'r-warn',
+  ActorNotFound: 'r-warn',
 };
+
 
 function row(k, v, cls = '') {
   if (v === undefined || v === null || v === '') return '';
@@ -230,8 +233,8 @@ export class Panel {
 
   phaseHTML() {
     const t = this.detail.agent.task;
-    const ready = (t.conditions || []).find((c) => c.type === 'Ready');
-    return row('Phase', `<b>${esc(t.phase || '?')}</b>${ready?.reason ? ` <span class="reason ${REASON_CLASS[ready.reason] || ''}">${esc(ready.reason)}</span>` : ''}`);
+    const reason = phaseReason(t);
+    return row('Phase', `<b>${esc(t.phase || '?')}</b>${reason ? ` <span class="reason ${REASON_CLASS[reason] || ''}">${esc(reason)}</span>` : ''}`);
   }
 
   condsHTML() {
@@ -240,7 +243,7 @@ export class Panel {
         (c) => `<tr><td>${esc(c.type)}</td><td class="st-${esc(c.status)}">${esc(c.status)}</td>
         <td><span class="reason ${REASON_CLASS[c.reason] || ''}">${esc(c.reason || '')}</span>
         ${c.message ? `<div class="msg">${esc(c.message)}</div>` : ''}</td>
-        <td class="muted">${c.lastTransitionTime ? duration(since(c.lastTransitionTime)) + ' ago' : ''}</td></tr>`,
+        <td class="muted">${c.updateTime ? duration(since(c.updateTime)) + ' ago' : ''}</td></tr>`,
       )
       .join('');
     return conds ? `<table class="conds"><thead><tr><th>Condition</th><th></th><th>Reason</th><th></th></tr></thead><tbody>${conds}</tbody></table>` : '';
@@ -257,8 +260,9 @@ export class Panel {
           : '<span class="muted">none</span>',
       ),
       a.worker && a.workerIPs?.length ? row('Worker IP', a.workerIPs.map((ip) => mono(ip)).join(' ')) : '',
-      // A PAUSED actor (derived by the collector since Substrate v0.5) has no
-      // worker but stays attached to the node holding its local snapshot.
+      // A suspended actor has no worker but can stay attached to the node
+      // holding its local snapshot (Substrate v1.0 keeps it there at least
+      // until the upload is durable).
       !a.worker && a.assignedNode ? row('Node', `${esc(a.assignedNode)}<span class="muted"> (holds its local snapshot)</span>`) : '',
       row('Template', a.template && mono(a.template)),
       row('Snapshot', a.snapshotURI ? mono(a.snapshotURI.replace(/^gs:\/\/[^/]+\//, '…/')) : '<span class="muted">none yet</span>'),
@@ -293,7 +297,7 @@ export class Panel {
         ${row('Idle policy', policy.join(' · ') || '<span class="muted">none (never suspended for idleness)</span>')}
         ${row('Image', t.image && mono(t.image.replace(/@sha256:([0-9a-f]{12})[0-9a-f]+/, '@sha256:$1…')))}
         ${row('Serves', t.httpPort ? `API on port ${t.httpPort} through the router` : '')}
-        ${row('Workspaces', (t.workspaces || []).map(esc).join(', '))}
+        ${row('Workspace', t.workspace && esc(t.workspace))}
         <div data-live="conds">${this.condsHTML()}</div>
         ${this.rawBlockHTML('task')}
       </section>`);

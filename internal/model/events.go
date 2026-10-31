@@ -51,9 +51,11 @@ type Event struct {
 	// new worker (worker_assignment).
 	From string `json:"from,omitempty"`
 	To   string `json:"to,omitempty"`
-	// Reason explains agent_suspended (IdleSuspended, CompletedSuspended,
-	// ActorSuspended) and agent_woke (ResumedByRequest when ax says the
-	// router resumed the task).
+	// Reason explains agent_suspended (IdleSuspended, CompletedSuspended:
+	// the reason on the ax task's AutoSuspended condition) and agent_woke
+	// (ResumedByRequest when ax says the router resumed the task). On
+	// task_updated it is the AutoSuspended reason if that changed, else the
+	// Ready reason if that did.
 	Reason  string `json:"reason,omitempty"`
 	Message string `json:"message,omitempty"`
 	// New marks a task_updated for a task the agent didn't have before.

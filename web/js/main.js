@@ -15,7 +15,7 @@
 // Wires the stream, the model, the scene, the filters, the event feed and
 // the side panel together.
 
-import { Model, CLASSES, CLASS_LABEL, makeFilter, stateClass } from './model.js';
+import { Model, CLASSES, CLASS_LABEL, makeFilter, stateClass, phaseReason } from './model.js';
 import { Stream, streamURL } from './stream.js';
 import { Scene, cssColor } from './scene.js';
 import { Panel } from './panel.js';
@@ -282,7 +282,7 @@ function hover(key, x, y) {
   tip.style.display = 'block';
   tip.style.left = `${x + 14}px`;
   tip.style.top = `${y + 14}px`;
-  const reason = a.task?.conditions?.find((c) => c.type === 'Ready')?.reason;
+  const reason = phaseReason(a.task);
   const wk = a.worker && model.workers.get(a.worker);
   tip.innerHTML = `<div class="t-name">${esc(a.atespace)}/<b>${esc(a.name)}</b></div>
     <div><span class="dot" style="background:${cssColor(a.state)}"></span>${esc(a.state.toLowerCase())} for ${duration(since(a.stateSince))}</div>

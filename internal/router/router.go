@@ -15,6 +15,11 @@
 // Package router talks to actors through Agent Substrate's atenet router,
 // which picks the actor from the ate-target-actor header.
 //
+// Since Substrate v0.6 the router serves HTTPS only and requires a client
+// certificate: NewTLSTransport builds that client side from the pod's
+// podidentity certificate and the servicedns trust bundle, and the router
+// must list the collector's SPIFFE ID in its ingress allowlist.
+//
 // Anything sent through the router reaches the actor, and the router resumes
 // a suspended actor to deliver it. So callers must only use RunnerStatus for
 // actors Substrate reports as running, and the attach proxy only on an
@@ -53,31 +58,43 @@ type RunnerStatus struct {
 
 // Client reaches actors through the router.
 type Client struct {
-	// Addr is the router's host:port, e.g.
-	// atenet-router.ate-system.svc.cluster.local:80.
+	// Addr is the router's host:port, reached over HTTPS (DefaultAddr), or
+	// a URL: https://host:port, or http://host:port for a plain-HTTP
+	// stand-in in development (a real router has no plain-HTTP listener).
 	Addr string
-	// HTTP defaults to a client with a 5s timeout.
-	HTTP *http.Client
+	// Transport carries every request, the runner status reads and the
+	// attach proxy alike: NewTLSTransport for the real router. Nil uses
+	// http.DefaultTransport, which has no client certificate.
+	Transport http.RoundTripper
+	// Timeout bounds a runner status read; zero means 5s. The attach proxy
+	// has none, since it streams.
+	Timeout time.Duration
 }
 
 func (c *Client) http() *http.Client {
-	if c.HTTP != nil {
-		return c.HTTP
+	t := c.Timeout
+	if t == 0 {
+		t = 5 * time.Second
 	}
-	return &http.Client{Timeout: 5 * time.Second}
+	return &http.Client{Timeout: t, Transport: c.Transport}
 }
 
-func (c *Client) base() string {
+// BaseURL is the router's URL: Addr when it has a scheme, else https://Addr.
+func (c *Client) BaseURL() string {
 	if strings.HasPrefix(c.Addr, "http://") || strings.HasPrefix(c.Addr, "https://") {
 		return strings.TrimSuffix(c.Addr, "/")
 	}
-	return "http://" + c.Addr
+	return "https://" + c.Addr
 }
+
+// Plaintext reports whether Addr is an explicit http:// URL, which needs no
+// TLS transport.
+func (c *Client) Plaintext() bool { return strings.HasPrefix(c.Addr, "http://") }
 
 // RunnerStatus reads an ax runner's status. The caller must have checked the
 // actor is running.
 func (c *Client) RunnerStatus(ctx context.Context, atespace, name string) (*RunnerStatus, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base()+StatusPath, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL()+StatusPath, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -122,8 +139,9 @@ func StaticToken(tok string) TokenSource {
 // agent bearer token. Browser credentials (cookies, Authorization) are not
 // forwarded. Streaming responses (SSE) are flushed as they arrive.
 func (c *Client) AttachProxy(token TokenSource, target func(*http.Request) (actor, path string)) http.Handler {
-	base, _ := url.Parse(c.base())
+	base, _ := url.Parse(c.BaseURL())
 	return &httputil.ReverseProxy{
+		Transport:     c.Transport,
 		FlushInterval: -1,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			actor, p := target(pr.In)

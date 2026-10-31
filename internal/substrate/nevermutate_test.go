@@ -25,7 +25,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ateapi "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/go-steer/substrate-scope/internal/axapi"
@@ -56,15 +56,15 @@ func mutatingRPCs(t *testing.T) map[string]string {
 			}
 		}
 	}
-	add(ateapipb.File_ateapi_proto)
+	add(ateapi.File_api_ateapi_v1_ateapi_proto)
 	add(axapi.File_ax_proto)
 	for _, must := range []string{
-		"SuspendActor", "ResumeActor", "DeleteActor", "CreateActor", "PauseActor", "RevertActor", "DrainWorker", "SuspendTask", "ResumeTask",
-		// Substrate v0.4: access policy writes (the collector must never
-		// grant itself or anyone else access) and the worker-only service.
+		"SuspendActor", "ResumeActor", "DeleteActor", "CreateActor", "UpdateActor", "RevertActor", "DrainWorker", "SuspendTask", "ResumeTask",
+		// Access policy writes (the collector must never grant itself or
+		// anyone else access) and the worker-only service.
 		"CreateGlobalAccessPolicy", "UpdateGlobalAccessPolicy",
 		"CreateAtespaceAccessPolicy", "UpdateAtespaceAccessPolicy", "DeleteAtespaceAccessPolicy",
-		"RegisterWorker", "MintAteomActorCertificate", "RequestActorSuspend",
+		"RegisterWorker", "MintWorkerActorCertificate", "MintActorJwt", "RequestActorSuspend",
 	} {
 		if _, ok := out[must]; !ok {
 			t.Fatalf("descriptor scan missed %s; the test is broken", must)
@@ -154,8 +154,8 @@ func TestReadAPIIsReadOnly(t *testing.T) {
 			t.Errorf("readAPI has non-read method %s", name)
 		}
 	}
-	if !typ.Implements(typ) || !reflect.TypeFor[ateapipb.ControlClient]().Implements(typ) {
-		t.Fatal("ateapipb.ControlClient no longer satisfies readAPI")
+	if !typ.Implements(typ) || !reflect.TypeFor[ateapi.ControlClient]().Implements(typ) {
+		t.Fatal("ateapi.ControlClient no longer satisfies readAPI")
 	}
 }
 

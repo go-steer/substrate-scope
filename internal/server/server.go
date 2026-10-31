@@ -17,7 +17,7 @@
 //	GET /api/snapshot                          the whole picture
 //	GET /api/stream                            WebSocket: snapshot, then event batches
 //	GET /api/agents/{atespace}/{name}          side panel details (+ runner status if running)
-//	GET /api/agents/{atespace}/{name}/raw      the agent's API objects (Actor, Task, Workspaces), redacted
+//	GET /api/agents/{atespace}/{name}/raw      the agent's API objects (Actor, Task, Workspace), redacted
 //	ANY /api/agents/{atespace}/{name}/attach/… optional proxy to the agent's session API
 //	GET /mast-web/a/{atespace}/{name}/…      mast-web attached to that agent (see mastweb.go)
 //	GET /config                                mast-web's bootstrap
@@ -36,8 +36,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/coder/websocket"
+	ateapi "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/go-steer/substrate-scope/internal/axapi"
@@ -62,7 +62,7 @@ type RunnerStatusReader interface {
 // ActorGetter reads a Substrate actor (answered from Substrate's database; it
 // never wakes the actor).
 type ActorGetter interface {
-	GetActor(ctx context.Context, atespace, name string) (*ateapipb.Actor, error)
+	GetActor(ctx context.Context, atespace, name string) (*ateapi.Actor, error)
 }
 
 // TaskGetter reads ax tasks and workspaces (from ax's store).
@@ -293,7 +293,7 @@ type RawDetail struct {
 const rawTimeout = 5 * time.Second
 
 // raw returns the agent's Substrate Actor and, for an ax task, its Task and
-// Workspaces, as redacted JSON. Only read RPCs are used, so it never wakes
+// Workspace, as redacted JSON. Only read RPCs are used, so it never wakes
 // the agent; an object that can't be read carries its error instead.
 func (s *Server) raw(w http.ResponseWriter, r *http.Request) {
 	as, name := r.PathValue("atespace"), r.PathValue("name")
@@ -326,7 +326,7 @@ func (s *Server) raw(w http.ResponseWriter, r *http.Request) {
 		}
 		m, err := s.o.RawTasks.GetTask(ctx, as, task)
 		add("task", "Task", task, m, err)
-		for _, ws := range a.Task.Workspaces {
+		if ws := a.Task.Workspace; ws != "" {
 			m, err := s.o.RawTasks.GetWorkspace(ctx, as, ws)
 			add("task", "Workspace", ws, m, err)
 		}
