@@ -274,10 +274,7 @@ export function syntheticRaw(a, workers) {
   const d = syntheticDetail(a, workers);
   if (!d) return null;
   const ag = d.agent;
-  // Substrate v0.5 has no PAUSING/PAUSED states: the collector derives them
-  // from SUSPENDING/SUSPENDED and the latest snapshot.
-  const apiState = { PAUSING: 'SUSPENDING', PAUSED: 'SUSPENDED' }[ag.state] || ag.state;
-  const status = { state: `ACTOR_STATE_${apiState}` };
+  const status = { state: `ACTOR_STATE_${ag.state}` };
   if (ag.worker) {
     status.workerAssignment = {
       worker: { name: ag.worker },
@@ -296,7 +293,7 @@ export function syntheticRaw(a, workers) {
         generation: 42,
         owner: 'SNAPSHOT_OWNER_ACTOR',
         fidelity: 'SNAPSHOT_FIDELITY_MEMORY',
-        durableSnapshot: { status: 'SNAPSHOT_STORAGE_STATUS_COMPLETED', object: { snapshotUri: ag.snapshotURI } },
+        durableSnapshot: { state: 'SNAPSHOT_STORAGE_STATE_COMPLETED', object: { snapshotUri: ag.snapshotURI } },
       },
     ];
     status.lastAssignedGeneration = 42;

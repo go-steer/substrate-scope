@@ -15,10 +15,11 @@
 package substrate
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ateapi "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/go-steer/substrate-scope/internal/model"
@@ -33,36 +34,13 @@ func ts(t *timestamppb.Timestamp) *time.Time {
 }
 
 // ActorState converts a Substrate state to the model's name for it.
-func ActorState(s ateapipb.ActorState) string {
+func ActorState(s ateapi.ActorState) string {
 	return strings.TrimPrefix(s.String(), "ACTOR_STATE_")
-}
-
-// agentState is the model's state for an actor. Substrate v0.5 dropped
-// ACTOR_STATE_PAUSING and ACTOR_STATE_PAUSED (a pause is now a suspend that
-// keeps a node-local snapshot), so they are derived the way the API server
-// itself tells a pause from a suspend (controlapi/snapshot_helpers.go at
-// v0.5.0): PAUSED is SUSPENDED with a latest snapshot that is node-local and
-// has no durable copy; PAUSING is SUSPENDING with a latest snapshot that has
-// neither a locality nor a durable copy yet (a suspend's has a pending
-// durable copy).
-func agentState(st *ateapipb.ActorStatus) string {
-	latest := latestSnapshot(st)
-	switch st.GetState() {
-	case ateapipb.ActorState_ACTOR_STATE_SUSPENDED:
-		if latest.GetLocality() != "" && latest.GetDurableSnapshot() == nil {
-			return model.StatePaused
-		}
-	case ateapipb.ActorState_ACTOR_STATE_SUSPENDING:
-		if latest != nil && latest.GetLocality() == "" && latest.GetDurableSnapshot() == nil {
-			return model.StatePausing
-		}
-	}
-	return ActorState(st.GetState())
 }
 
 // latestSnapshot returns the snapshot at the actor's last assigned
 // generation, nil if it has none.
-func latestSnapshot(st *ateapipb.ActorStatus) *ateapipb.Snapshot {
+func latestSnapshot(st *ateapi.ActorStatus) *ateapi.Snapshot {
 	for _, s := range st.GetSnapshots() {
 		if s.GetGeneration() == st.GetLastAssignedGeneration() {
 			return s
@@ -74,10 +52,10 @@ func latestSnapshot(st *ateapipb.ActorStatus) *ateapipb.Snapshot {
 // latestCompletedDurable returns the highest-generation snapshot with a
 // completed durable copy (the one a suspended actor resumes from), nil if
 // there is none.
-func latestCompletedDurable(st *ateapipb.ActorStatus) *ateapipb.Snapshot {
-	var out *ateapipb.Snapshot
+func latestCompletedDurable(st *ateapi.ActorStatus) *ateapi.Snapshot {
+	var out *ateapi.Snapshot
 	for _, s := range st.GetSnapshots() {
-		if s.GetDurableSnapshot().GetStatus() == ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED &&
+		if s.GetDurableSnapshot().GetState() == ateapi.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED &&
 			(out == nil || s.GetGeneration() >= out.GetGeneration()) {
 			out = s
 		}
@@ -86,21 +64,22 @@ func latestCompletedDurable(st *ateapipb.ActorStatus) *ateapipb.Snapshot {
 }
 
 // snapshotInProgress reports whether the actor's latest snapshot is still
-// being taken: its durable copy is pending, or it is a local checkpoint not
-// captured yet (no locality and no durable copy).
-func snapshotInProgress(st *ateapipb.ActorStatus) bool {
+// being taken: its durable copy is pending (in v1.0 that includes the upload
+// an asynchronous suspend leaves running after the actor is SUSPENDED), or it
+// has neither a locality nor a durable copy yet.
+func snapshotInProgress(st *ateapi.ActorStatus) bool {
 	latest := latestSnapshot(st)
 	if latest == nil {
 		return false
 	}
 	if d := latest.GetDurableSnapshot(); d != nil {
-		return d.GetStatus() == ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING
+		return d.GetState() == ateapi.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_PENDING
 	}
 	return latest.GetLocality() == ""
 }
 
 // ToAgent converts a Substrate actor.
-func ToAgent(a *ateapipb.Actor) model.Agent {
+func ToAgent(a *ateapi.Actor) model.Agent {
 	md := a.GetMetadata()
 	st := a.GetStatus()
 	out := model.Agent{
@@ -110,7 +89,7 @@ func ToAgent(a *ateapipb.Actor) model.Agent {
 		Version:            md.GetVersion(),
 		CreateTime:         ts(md.GetCreateTime()),
 		UpdateTime:         ts(md.GetUpdateTime()),
-		State:              agentState(st),
+		State:              ActorState(st.GetState()),
 		SnapshotURI:        latestCompletedDurable(st).GetDurableSnapshot().GetObject().GetSnapshotUri(),
 		SnapshotInProgress: snapshotInProgress(st),
 	}
@@ -139,23 +118,40 @@ func ToAgent(a *ateapipb.Actor) model.Agent {
 }
 
 // ToWorker converts a Substrate worker and its assignments.
-func ToWorker(w *ateapipb.Worker, assignments []*ateapipb.ActorAssignment) model.Worker {
+func ToWorker(w *ateapi.Worker, assignments []*ateapi.ActorAssignment) model.Worker {
+	st := w.GetStatus()
 	out := model.Worker{
 		Name:            w.GetMetadata().GetName(),
 		Pool:            w.GetWorkerPool(),
 		Pod:             w.GetWorkerPod(),
 		Namespace:       w.GetWorkerNamespace(),
 		Node:            w.GetNodeName(),
-		SandboxClass:    w.GetSandboxClass(),
-		State:           strings.TrimPrefix(w.GetStatus().GetState().String(), "WORKER_STATE_"),
-		CapacityActors:  w.GetStatus().GetCapacity().GetActors(),
-		AllocatedActors: w.GetStatus().GetAllocated().GetActors(),
-		IPs:             nonEmpty(w.GetIps()),
-		Epoch:           w.GetEpoch(),
-		ObservedEpoch:   w.GetStatus().GetObservedEpoch(),
+		State:           strings.TrimPrefix(st.GetState().String(), "WORKER_STATE_"),
+		CapacityActors:  st.GetCapacity().GetActors(),
+		AllocatedActors: st.GetAllocated().GetActors(),
+		IPs:             nonEmpty(st.GetIps()),
+		Epoch:           st.GetRegisteredEpoch(),
+		ObservedEpoch:   st.GetObservedEpoch(),
+		CapacityCPU:     cpuQuantity(st.GetCapacity().GetCpuMillicores()),
+		CapacityMemory:  memoryQuantity(st.GetCapacity().GetMemoryBytes()),
+		AllocatedCPU:    cpuQuantity(st.GetAllocated().GetCpuMillicores()),
+		AllocatedMemory: memoryQuantity(st.GetAllocated().GetMemoryBytes()),
 	}
-	out.CapacityCPU, out.CapacityMemory = limits(w.GetStatus().GetCapacity().GetResources())
-	out.AllocatedCPU, out.AllocatedMemory = limits(w.GetStatus().GetAllocated().GetResources())
+	// Zero allocated is "0" next to a reported capacity: the worker is
+	// idle, not silent about it.
+	if out.AllocatedCPU == "" && out.CapacityCPU != "" {
+		out.AllocatedCPU = "0"
+	}
+	if out.AllocatedMemory == "" && out.CapacityMemory != "" {
+		out.AllocatedMemory = "0"
+	}
+	// One entry today (one per WorkerPool sandbox class); the first is the
+	// worker's class. Empty until the worker process reports its runtimes.
+	for _, sc := range st.GetSandboxClasses() {
+		if out.SandboxClass = sc.GetSandboxClass(); out.SandboxClass != "" {
+			break
+		}
+	}
 	for _, as := range assignments {
 		out.Actors = append(out.Actors, model.Key(as.GetActor().GetAtespace(), as.GetActor().GetName()))
 	}
@@ -174,20 +170,37 @@ func nonEmpty(ss []string) []string {
 	return out
 }
 
-// limits returns the cpu and memory quantities of a resource list.
-func limits(r *ateapipb.Resources) (cpu, memory string) {
-	for _, l := range r.GetLimits() {
-		switch l.GetName() {
-		case "cpu":
-			cpu = l.GetQuantity()
-		case "memory":
-			memory = l.GetQuantity()
+// cpuQuantity formats millicores as a Kubernetes quantity ("500m", "2"), ""
+// for none.
+func cpuQuantity(m int64) string {
+	switch {
+	case m <= 0:
+		return ""
+	case m%1000 == 0:
+		return strconv.FormatInt(m/1000, 10)
+	default:
+		return strconv.FormatInt(m, 10) + "m"
+	}
+}
+
+// memoryQuantity formats bytes as a Kubernetes quantity, with the largest
+// binary suffix that divides it exactly ("960Mi", "2Gi", "1000"), "" for none.
+func memoryQuantity(b int64) string {
+	if b <= 0 {
+		return ""
+	}
+	for _, u := range []struct {
+		suffix string
+		size   int64
+	}{{"Ti", 1 << 40}, {"Gi", 1 << 30}, {"Mi", 1 << 20}, {"Ki", 1 << 10}} {
+		if b%u.size == 0 {
+			return strconv.FormatInt(b/u.size, 10) + u.suffix
 		}
 	}
-	return cpu, memory
+	return strconv.FormatInt(b, 10)
 }
 
 // ToAtespace converts a Substrate atespace.
-func ToAtespace(a *ateapipb.Atespace) model.Atespace {
+func ToAtespace(a *ateapi.Atespace) model.Atespace {
 	return model.Atespace{Name: a.GetMetadata().GetName(), CreateTime: ts(a.GetMetadata().GetCreateTime())}
 }

@@ -25,12 +25,10 @@ export function stateClass(state) {
       return 'running';
     case 'RESUMING':
     case 'SUSPENDING':
-    case 'PAUSING':
     case 'REVERTING':
     case 'DELETING':
       return 'transition';
     case 'SUSPENDED':
-    case 'PAUSED':
       return 'suspended';
     case 'CRASHED':
       return 'crashed';

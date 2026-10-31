@@ -69,8 +69,11 @@ func run() error {
 		subCA        = flag.String("substrate-ca-file", "/run/servicedns-ca/trust-bundle.pem", "CA bundle for the control API (servicedns cluster trust bundle)")
 		subInsecure  = flag.Bool("substrate-insecure-skip-verify", false, "skip TLS verification (development only)")
 
-		axAddr     = flag.String("ax-endpoint", envOr("SCOPE_AX_ENDPOINT", "ax-server.ax-system.svc.cluster.local:8080"), "ax-server gRPC host:port; empty disables ax")
-		routerAddr = flag.String("router", envOr("SCOPE_ROUTER", "atenet-router.ate-system.svc.cluster.local:80"), "atenet router host:port; empty disables runner status and attach")
+		axAddr           = flag.String("ax-endpoint", envOr("SCOPE_AX_ENDPOINT", "ax-server.ax-system.svc.cluster.local:8080"), "ax-server gRPC host:port; empty disables ax")
+		routerAddr       = flag.String("router", envOr("SCOPE_ROUTER", router.DefaultAddr), "atenet router: host:port over HTTPS with mTLS, or an http:// URL for a plain-HTTP stand-in (development); empty disables runner status and attach")
+		routerCert       = flag.String("router-cert-file", envOr("SCOPE_ROUTER_CERT_FILE", router.DefaultCertFile), "client credential bundle for the router (podCertificate projection from podidentity.podcert.ate.dev/identity: PKCS#8 key, then the chain; re-read as it rotates)")
+		routerCA         = flag.String("router-ca-file", envOr("SCOPE_ROUTER_CA_FILE", router.DefaultCAFile), "CA bundle the router's certificate must chain to (servicedns cluster trust bundle; re-read as it rotates)")
+		routerServerName = flag.String("router-server-name", envOr("SCOPE_ROUTER_SERVER_NAME", router.DefaultServerName), "name verified on the router's certificate")
 
 		attachTokenFile = flag.String("attach-token-file", envOr("SCOPE_ATTACH_TOKEN_FILE", ""), "agent bearer token file; enables the attach proxy")
 
@@ -121,6 +124,18 @@ func run() error {
 	features := model.Features{Raw: true}
 	if *routerAddr != "" {
 		rc := &router.Client{Addr: *routerAddr}
+		if !rc.Plaintext() {
+			tr, stopTLS, err := router.NewTLSTransport(router.TLSOptions{
+				CertFile:   *routerCert,
+				CAFile:     *routerCA,
+				ServerName: *routerServerName,
+			})
+			if err != nil {
+				return fmt.Errorf("%w (or pass --router= to run without runner status and attach)", err)
+			}
+			defer stopTLS()
+			rc.Transport = tr
+		}
 		sopts.Runner = rc
 		features.RunnerStatus = true
 		token := router.TokenSource(nil)
@@ -131,7 +146,7 @@ func run() error {
 			token = router.StaticToken(os.Getenv("SCOPE_ATTACH_TOKEN"))
 		}
 		if token != nil {
-			sopts.Attach = &router.Client{Addr: *routerAddr, HTTP: &http.Client{}}
+			sopts.Attach = rc
 			sopts.AttachToken = token
 			features.Attach = true
 		}
@@ -171,7 +186,7 @@ func run() error {
 		_ = srv.Shutdown(sctx)
 	}()
 	slog.Info("substrate-scope listening", "addr", *addr, "cluster", *clusterName,
-		"ax", *axAddr != "", "router", *routerAddr != "", "attach", features.Attach)
+		"ax", *axAddr != "", "router", *routerAddr, "attach", features.Attach)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

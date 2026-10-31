@@ -40,7 +40,7 @@ func NewWorld() *World {
 // IsSuspended reports whether a state means the actor holds no worker and
 // stays put until something resumes it.
 func IsSuspended(state string) bool {
-	return state == StateSuspended || state == StateSuspending || state == StatePaused || state == StatePausing
+	return state == StateSuspended || state == StateSuspending
 }
 
 // IsAwake reports whether a state means the actor is running or on its way.

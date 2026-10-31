@@ -257,8 +257,9 @@ export class Panel {
           : '<span class="muted">none</span>',
       ),
       a.worker && a.workerIPs?.length ? row('Worker IP', a.workerIPs.map((ip) => mono(ip)).join(' ')) : '',
-      // A PAUSED actor (derived by the collector since Substrate v0.5) has no
-      // worker but stays attached to the node holding its local snapshot.
+      // A suspended actor has no worker but can stay attached to the node
+      // holding its local snapshot (Substrate v1.0 keeps it there at least
+      // until the upload is durable).
       !a.worker && a.assignedNode ? row('Node', `${esc(a.assignedNode)}<span class="muted"> (holds its local snapshot)</span>`) : '',
       row('Template', a.template && mono(a.template)),
       row('Snapshot', a.snapshotURI ? mono(a.snapshotURI.replace(/^gs:\/\/[^/]+\//, '…/')) : '<span class="muted">none yet</span>'),

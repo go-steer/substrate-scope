@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	ateapi "go.ate.dev/substrate/api/ateapi/v1"
 
 	"github.com/go-steer/substrate-scope/internal/axapi"
 	"github.com/go-steer/substrate-scope/internal/collector"
@@ -33,9 +33,9 @@ import (
 
 type fakeRaw struct{ gets []string }
 
-func (f *fakeRaw) GetActor(_ context.Context, as, name string) (*ateapipb.Actor, error) {
+func (f *fakeRaw) GetActor(_ context.Context, as, name string) (*ateapi.Actor, error) {
 	f.gets = append(f.gets, "actor "+as+"/"+name)
-	return &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Atespace: as, Name: name}}, nil
+	return &ateapi.Actor{Metadata: &ateapi.ResourceMetadata{Atespace: as, Name: name}}, nil
 }
 
 func (f *fakeRaw) GetTask(_ context.Context, as, name string) (*axapi.Task, error) {

@@ -41,10 +41,9 @@ test('applyEvents follows sequence numbers and rejects gaps', () => {
 test('state classes and filters', () => {
   assert.equal(stateClass('RUNNING'), 'running');
   assert.equal(stateClass('SUSPENDING'), 'transition');
-  // PAUSING and PAUSED are derived by the collector (Substrate v0.5 dropped
-  // them); REVERTING is v0.5's crash-recovery state.
-  assert.equal(stateClass('PAUSING'), 'transition');
-  assert.equal(stateClass('PAUSED'), 'suspended');
+  // REVERTING is the crash-recovery state. PAUSING and PAUSED are gone
+  // (Substrate v0.5 dropped them, v1.0 removed PauseActor).
+  assert.equal(stateClass('PAUSED'), 'pending');
   assert.equal(stateClass('REVERTING'), 'transition');
   assert.equal(stateClass('CRASHED'), 'crashed');
   assert.equal(stateClass('UNSPECIFIED'), 'pending');

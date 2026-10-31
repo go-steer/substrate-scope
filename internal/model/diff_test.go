@@ -92,7 +92,6 @@ func TestDiffStateTransitions(t *testing.T) {
 		{"wake straight to running", StateSuspended, StateRunning, []string{EventAgentState, EventAgentWoke}},
 		{"resuming to running is not a second wake", StateResuming, StateRunning, []string{EventAgentState}},
 		{"crash", StateRunning, StateCrashed, []string{EventAgentState, EventAgentCrashed}},
-		{"pause counts as suspend", StateRunning, StatePausing, []string{EventAgentState, EventAgentSuspended}},
 		{"revert", StateCrashed, StateReverting, []string{EventAgentState}},
 	}
 	for _, c := range cases {

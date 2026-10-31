@@ -16,13 +16,19 @@
 # Run the collector on your machine against a real cluster, serving web/ from
 # disk so front-end edits show up on reload.
 #
-# It port-forwards Substrate's API server, ax-server and the atenet router,
-# mints a short-lived token for the substrate-scope service account
-# (kubectl apply -f deploy/ first) and fetches the servicedns CA bundle.
-# Credentials go to .dev/ (git-ignored).
+# It port-forwards Substrate's API server and ax-server, mints a short-lived
+# token for the substrate-scope service account (kubectl apply -f deploy/
+# first) and fetches the servicedns CA bundle. Credentials go to .dev/
+# (git-ignored).
+#
+# The atenet router (runner status, attach) is off by default: since
+# Substrate v0.6 it serves only mTLS with a pod certificate, which a
+# workstation doesn't have. ROUTER=http://host:port points the collector at
+# a plain-HTTP stand-in instead.
 #
 #   CONTEXT=agent-substrate dev/run-local            # UI on http://localhost:8080
-#   ATTACH_TOKEN_FILE=path dev/run-local             # also enable the attach proxy
+#   ROUTER=http://127.0.0.1:18081 ATTACH_TOKEN_FILE=path dev/run-local
+#                                                    # router stand-in + attach proxy
 #
 # On a Cloud Workstation, open the UI through its port proxy: that rewrites
 # Host, so pages from *.cloudworkstations.dev are allowed here by default
@@ -45,7 +51,6 @@ cleanup() { kill "${pids[@]}" 2>/dev/null || true; }
 trap cleanup EXIT
 $K -n ate-system port-forward deploy/ate-api-server 18443:443 >/dev/null & pids+=($!)
 $K -n ax-system port-forward svc/ax-server 18080:8080 >/dev/null & pids+=($!)
-$K -n ate-system port-forward svc/atenet-router 18081:80 >/dev/null & pids+=($!)
 sleep 2
 
 attach=()
@@ -59,5 +64,5 @@ go run ./cmd/substrate-scope \
   --substrate-token-file=.dev/ate-token \
   --substrate-ca-file=.dev/ca.pem \
   --ax-endpoint=127.0.0.1:18080 \
-  --router=127.0.0.1:18081 \
+  --router="${ROUTER:-}" \
   "${attach[@]}" "$@"

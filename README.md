@@ -35,9 +35,12 @@ Rendered with three.js, GPU instancing and semantic zoom (district heat tiles fa
 
 ## Quickstart (in a cluster)
 
-Requires Agent Substrate **v0.5.0** (the collector is built against it; v0.4 API servers are not supported). The collector runs as its own service account in namespace `substrate-scope`, which must carry the label `ate.dev/api-access=true`: from v0.5, NetworkPolicies in `ate-system` admit in-cluster callers of the Substrate API only from labeled namespaces (`deploy/namespace.yaml` sets it; for an existing namespace, `kubectl label namespace substrate-scope ate.dev/api-access=true`). It authenticates to Substrate's control API with a projected token for audience `api.ate-system.svc` and trusts the servicedns CA bundle, the same way ax-server does.
+Requires Agent Substrate **v1.0.0-rc.1** or later (the collector is built against `go.ate.dev/substrate` v1.0.0-rc.1; v1.0 moved the API to proto package `substrate.ateapi.v1`, so v0.x API servers answer every call with Unimplemented). The collector runs as its own service account in namespace `substrate-scope`, which must carry the label `ate.dev/api-access=true`: NetworkPolicies in `ate-system` admit in-cluster callers of the Substrate API only from labeled namespaces (`deploy/namespace.yaml` sets it; for an existing namespace, `kubectl label namespace substrate-scope ate.dev/api-access=true`). It authenticates to Substrate's control API with a projected token for audience `api.ate-system.svc` and trusts the servicedns CA bundle, the same way ax-server does.
 
-If Substrate's API server runs with authorization enforced (`--experimental-enable-authz`), grant the collector the **global viewer** role: an entry `user:system:serviceaccount:substrate-scope:substrate-scope` under role `viewer` in the global access policy, created or updated by one of the `--authz-bootstrap-owners`. Without it, listing atespaces and actors fails with PermissionDenied. See [Authorization](docs/design.md#authorization) for which calls are checked and a grpcurl example.
+Two grants on the Substrate side, both needed from v1.0:
+
+- **API access.** v1.0 always enforces authorization, so grant the collector the **global viewer** role: `user:system:serviceaccount:substrate-scope:substrate-scope` under role `viewer` in the global access policy (`kubectl ate create access-policy --global` / `update access-policy --global`, as a bootstrap owner or global owner). Without it, every list fails with PermissionDenied. See [Authorization](docs/design.md#authorization).
+- **Router allowlist.** Runner status and the attach proxy go through the atenet router's HTTPS ingress with this pod's podidentity certificate. Its SPIFFE ID, `spiffe://cluster.local/ns/substrate-scope/sa/substrate-scope`, must be in ate-setup's `ATE_INGRESS_ALLOWED_SPIFFE_IDS` (`--ingress-allowed-spiffe-ids`); otherwise the router refuses those requests (the rest of the UI works). See [Router mTLS](docs/design.md#router-mtls).
 
 ```sh
 kubectl apply -f deploy/namespace.yaml -f deploy/substrate-scope.yaml
@@ -54,13 +57,13 @@ kubectl -n substrate-scope rollout restart deploy/substrate-scope
 
 With the attach proxy on, the collector also serves a vendored copy of mast-web at `/mast-web/a/{atespace}/{name}/`, attached to that one agent (see [Sessions in mast-web](#sessions-in-mast-web)).
 
-Flags (see `substrate-scope -h`): `--cluster` (name on the island), `--substrate-*` (endpoint, authority, token and CA files), `--ax-endpoint` (empty disables ax), `--router` (empty disables runner status and attach), `--attach-token-file`, and the poll intervals (`--actor-interval=2s`, `--worker-interval=10s`, `--task-interval=10s`).
+Flags (see `substrate-scope -h`): `--cluster` (name on the island), `--substrate-*` (endpoint, authority, token and CA files), `--ax-endpoint` (empty disables ax), `--router` (default `atenet-router.ate-system.svc.cluster.local:443` over mTLS; an `http://` URL dials a plain-HTTP stand-in for development; empty disables runner status and attach), `--router-cert-file`, `--router-ca-file` and `--router-server-name` (the router's mTLS client side, defaults match `deploy/`), `--attach-token-file`, and the poll intervals (`--actor-interval=2s`, `--worker-interval=10s`, `--task-interval=10s`).
 
 ## Never waking an agent
 
 Looking must not change what you look at, so the collector:
 
-- calls only Substrate's list and get RPCs and ax's `ListTasks`, which are answered from those services' own stores and never reach an actor. A test (`internal/substrate/nevermutate_test.go`) fails if any code refers to a mutating Substrate or ax RPC (including v0.4's access policy writes, so the collector can never grant itself access);
+- calls only Substrate's list and get RPCs and ax's `ListTasks`, which are answered from those services' own stores and never reach an actor. A test (`internal/substrate/nevermutate_test.go`) fails if any code refers to a mutating Substrate or ax RPC (including the access policy writes, so the collector can never grant itself access);
 - reads an ax runner's status (`/metadata/v1alpha1/ax/status`, through the router) only for the agent selected in the UI, only if Substrate reports it `RUNNING`, and re-checks that with `GetActor` right before, because the router resumes a suspended actor to deliver any request;
 - refuses attach requests to an agent that isn't running unless the request says it may wake it (`scope_wake=1`). The UI asks first and says so.
 
@@ -88,7 +91,7 @@ make push          # build and push a local tree; then make deploy IMAGE_REF=<pr
 
 Every merge to main is built by CI: the image job pushes `IMAGE:<sha>` and `IMAGE:main`. Deploying to agent-substrate is [shipmind](https://github.com/go-steer/shipmind)'s job: it pins a substrate-scope commit in its `versions.yaml`, builds the image from that commit, and deploys it with the rest of the platform. To ship a change there, move that pin. `make deploy` still applies `deploy/` by hand to a cluster of your own.
 
-`dev/run-local` port-forwards Substrate's API server, ax-server and the router, mints a short-lived token for the `substrate-scope` service account and fetches the CA bundle into `.dev/` (git-ignored).
+`dev/run-local` port-forwards Substrate's API server and ax-server, mints a short-lived token for the `substrate-scope` service account and fetches the CA bundle into `.dev/` (git-ignored). The router is off there, since a workstation has no pod certificate for its mTLS ingress; `ROUTER=http://host:port` points it at a plain-HTTP stand-in.
 
 The front end is plain ES modules in `web/` with a vendored three.js build (`web/vendor/three/`, see its README); there is no bundler. `node hack/screens.mjs --url ... --out DIR` takes screenshots with headless Chromium (WebGL on SwiftShader).
 

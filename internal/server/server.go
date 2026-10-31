@@ -36,8 +36,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/coder/websocket"
+	ateapi "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/go-steer/substrate-scope/internal/axapi"
@@ -62,7 +62,7 @@ type RunnerStatusReader interface {
 // ActorGetter reads a Substrate actor (answered from Substrate's database; it
 // never wakes the actor).
 type ActorGetter interface {
-	GetActor(ctx context.Context, atespace, name string) (*ateapipb.Actor, error)
+	GetActor(ctx context.Context, atespace, name string) (*ateapi.Actor, error)
 }
 
 // TaskGetter reads ax tasks and workspaces (from ax's store).
