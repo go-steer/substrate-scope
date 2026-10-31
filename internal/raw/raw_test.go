@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/protobuf/types/known/structpb"
+
 	"github.com/go-steer/substrate-scope/internal/axapi"
 )
 
@@ -46,19 +48,26 @@ func TestProtoRedactsTask(t *testing.T) {
 				Credentials: []*axapi.CredentialInjection{{Header: "Authorization", Prefix: "Bearer ", CredentialUri: "sm://projects/p/secrets/key"}},
 			}},
 		},
-		Status: &axapi.TaskStatus{Phase: "Running", Actor: "t1", Usage: &axapi.UsageStats{PromptTokens: 1200, CompletionTokens: 300}},
+		Status: &axapi.TaskStatus{Phase: "Running", Actor: "t1"},
 	}
+	// spec.config is free-form runner configuration; ax says it must not
+	// hold secrets, but the same key-based masking applies to it.
+	cfg, err := structpb.NewStruct(map[string]any{"maxTurns": 20, "model": "gemini", "apiToken": "tok-in-config"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Spec.Config = cfg
 	v, err := Proto(task)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := encode(t, v)
-	for _, leak := range []string{"sk-live-123", "debug", "sm://projects"} {
+	for _, leak := range []string{"sk-live-123", "debug", "sm://projects", "tok-in-config"} {
 		if strings.Contains(got, leak) {
 			t.Errorf("leaked %q: %s", leak, got)
 		}
 	}
-	for _, keep := range []string{`"GEMINI_API_KEY"`, `"LOG_LEVEL"`, `"runner:1"`, `"--port=8080"`, `"api.example.com"`, `"header":"Authorization"`, `"promptTokens":1200`, `"phase":"Running"`} {
+	for _, keep := range []string{`"GEMINI_API_KEY"`, `"LOG_LEVEL"`, `"runner:1"`, `"--port=8080"`, `"api.example.com"`, `"header":"Authorization"`, `"maxTurns":20`, `"model":"gemini"`, `"phase":"Running"`} {
 		if !strings.Contains(got, keep) {
 			t.Errorf("missing %s: %s", keep, got)
 		}

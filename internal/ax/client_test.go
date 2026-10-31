@@ -18,10 +18,12 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/go-steer/substrate-scope/internal/axapi"
 )
@@ -58,7 +60,8 @@ func TestListTasksPaginatesAndKeysByActor(t *testing.T) {
 			Metadata: &axapi.ObjectMeta{Atespace: "cred-test", Name: fmt.Sprintf("t%03d", i)},
 			Spec:     &axapi.TaskSpec{Idle: &axapi.TaskIdle{SuspendAfter: "10m"}, Http: &axapi.TaskHTTP{Port: 8484}},
 			Status: &axapi.TaskStatus{Phase: "Suspended", Actor: fmt.Sprintf("t%03d", i), Conditions: []*axapi.Condition{
-				{Type: "Ready", Status: "False", Reason: "IdleSuspended"},
+				{Type: "Ready", Status: "False", Reason: "Suspended"},
+				{Type: "AutoSuspended", Status: "True", Reason: "IdleSuspended"},
 			}},
 		})
 	}
@@ -71,7 +74,52 @@ func TestListTasksPaginatesAndKeysByActor(t *testing.T) {
 		t.Fatalf("got %d tasks in %d calls, want 450 in 3", len(got), f.calls)
 	}
 	task := got["t123"]
-	if task.Phase != "Suspended" || task.IdleSuspendAfter != "10m" || task.HTTPPort != 8484 || task.Ready().Reason != "IdleSuspended" {
+	if task.Phase != "Suspended" || task.IdleSuspendAfter != "10m" || task.HTTPPort != 8484 || task.Ready().Reason != "Suspended" || task.AutoSuspended().Reason != "IdleSuspended" {
 		t.Fatalf("task = %+v", task)
+	}
+}
+
+func TestToTask(t *testing.T) {
+	created := timestamppb.New(time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC))
+	read := timestamppb.New(time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC))
+	suspended := timestamppb.New(time.Date(2026, 10, 31, 11, 0, 0, 0, time.UTC))
+	task := &axapi.Task{
+		Metadata: &axapi.ObjectMeta{Atespace: "cred-test", Name: "triage", CreateTime: created},
+		Spec: &axapi.TaskSpec{
+			Image:        "runner",
+			Command:      []string{"mast"},
+			Workspace:    &axapi.WorkspaceRef{Name: "repo"},
+			Idle:         &axapi.TaskIdle{SuspendAfter: "10m", BusyPath: "/busy"},
+			OnCompletion: "Suspend",
+			Http:         &axapi.TaskHTTP{Port: 8484},
+		},
+		Status: &axapi.TaskStatus{Phase: "Suspended", Conditions: []*axapi.Condition{
+			{Type: "Ready", Status: "False", Reason: "Suspended", UpdateTime: read},
+			{Type: "AutoSuspended", Status: "True", Reason: "IdleSuspended", Message: "No requests for 10m0s", UpdateTime: suspended},
+		}},
+	}
+	got := ToTask(task)
+	if got.Name != "triage" || got.Workspace != "repo" || got.CreateTime == nil || !got.CreateTime.Equal(created.AsTime()) ||
+		got.IdleSuspendAfter != "10m" || got.IdleBusyPath != "/busy" || got.OnCompletion != "Suspend" || got.HTTPPort != 8484 {
+		t.Fatalf("ToTask = %+v", got)
+	}
+	// Ready is derived on every read: its time is the read's, so it is dropped.
+	if r := got.Ready(); r == nil || r.Reason != "Suspended" || r.UpdateTime != nil {
+		t.Fatalf("Ready = %+v", r)
+	}
+	if a := got.AutoSuspended(); a == nil || a.Status != "True" || a.Reason != "IdleSuspended" || a.UpdateTime == nil || !a.UpdateTime.Equal(suspended.AsTime()) {
+		t.Fatalf("AutoSuspended = %+v", a)
+	}
+	// Failed covers both ax's own failures and a crashed actor (derived),
+	// so Ready has no time there either.
+	task.Status = &axapi.TaskStatus{Phase: "Failed", Conditions: []*axapi.Condition{{Type: "Ready", Status: "False", Reason: "ActorNotFound", UpdateTime: read}}}
+	failed := ToTask(task)
+	if r := failed.Ready(); r == nil || r.Reason != "ActorNotFound" || r.UpdateTime != nil {
+		t.Fatalf("failed Ready = %+v", r)
+	}
+	// Unknown: ax could not reach Substrate.
+	task.Status = &axapi.TaskStatus{Phase: "Unknown", Conditions: []*axapi.Condition{{Type: "Ready", Status: "Unknown", Reason: "SubstrateUnavailable", UpdateTime: read}}}
+	if got := ToTask(task); got.Phase != "Unknown" || got.Ready().Reason != "SubstrateUnavailable" || got.Ready().UpdateTime != nil {
+		t.Fatalf("unknown = %+v", got)
 	}
 }

@@ -14,7 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Model, stateClass, makeFilter } from './model.js';
+import { Model, stateClass, makeFilter, phaseReason } from './model.js';
 import { describe } from './feed.js';
 
 const snap = {
@@ -61,4 +61,15 @@ test('feed prefers the meaningful event over the raw state change', () => {
   ]);
   assert.equal(lines.length, 1);
   assert.match(lines[0].text, /woke by a request/);
+});
+
+test('phase reason: AutoSuspended while True, else Ready', () => {
+  const cond = (type, status, reason) => ({ type, status, reason });
+  assert.equal(phaseReason({ conditions: [cond('Ready', 'False', 'Suspended'), cond('AutoSuspended', 'True', 'IdleSuspended')] }), 'IdleSuspended');
+  assert.equal(phaseReason({ conditions: [cond('AutoSuspended', 'True', 'CompletedSuspended'), cond('Ready', 'False', 'Suspended')] }), 'CompletedSuspended');
+  // Woken again: Ready says what it is now.
+  assert.equal(phaseReason({ conditions: [cond('Ready', 'True', 'TaskRunning'), cond('AutoSuspended', 'False', 'ResumedByRequest')] }), 'TaskRunning');
+  assert.equal(phaseReason({ conditions: [cond('Ready', 'Unknown', 'SubstrateUnavailable')] }), 'SubstrateUnavailable');
+  assert.equal(phaseReason({}), '');
+  assert.equal(phaseReason(undefined), '');
 });

@@ -37,6 +37,14 @@ export function stateClass(state) {
   }
 }
 
+/** The reason to show next to the ax phase: why ax suspended the task (AutoSuspended, while True), else Ready's. */
+export function phaseReason(task) {
+  const conds = task?.conditions || [];
+  const auto = conds.find((c) => c.type === 'AutoSuspended');
+  if (auto?.status === 'True' && auto.reason) return auto.reason;
+  return conds.find((c) => c.type === 'Ready')?.reason || '';
+}
+
 /** Human label of a visual class. */
 export const CLASS_LABEL = {
   running: 'Running',

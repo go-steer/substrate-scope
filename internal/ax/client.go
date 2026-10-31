@@ -119,6 +119,13 @@ func ts(t *timestamppb.Timestamp) *time.Time {
 }
 
 // ToTask converts an ax task.
+//
+// The Ready condition's update_time is dropped. Unless the phase is one ax
+// stores for its own work, ax derives the phase and Ready from the actor on
+// every read (ax #515) and builds Ready afresh, so its time is the read's;
+// keeping it would make every task look changed on every poll. The phase
+// alone doesn't tell the two apart (a crashed actor's task is Failed, like
+// one ax failed to provision), so Ready never carries a time here.
 func ToTask(t *axapi.Task) model.Task {
 	sp := t.GetSpec()
 	out := model.Task{
@@ -130,19 +137,21 @@ func ToTask(t *axapi.Task) model.Task {
 		IdleBusyPath:     sp.GetIdle().GetBusyPath(),
 		OnCompletion:     sp.GetOnCompletion(),
 		HTTPPort:         sp.GetHttp().GetPort(),
-		CreateTime:       ts(t.GetMetadata().GetCreationTimestamp()),
-	}
-	for _, w := range sp.GetWorkspaces() {
-		out.Workspaces = append(out.Workspaces, w.GetName())
+		CreateTime:       ts(t.GetMetadata().GetCreateTime()),
+		Workspace:        sp.GetWorkspace().GetName(),
 	}
 	for _, c := range t.GetStatus().GetConditions() {
-		out.Conditions = append(out.Conditions, model.Condition{
-			Type:               c.GetType(),
-			Status:             c.GetStatus(),
-			Reason:             c.GetReason(),
-			Message:            c.GetMessage(),
-			LastTransitionTime: ts(c.GetLastTransitionTime()),
-		})
+		mc := model.Condition{
+			Type:       c.GetType(),
+			Status:     c.GetStatus(),
+			Reason:     c.GetReason(),
+			Message:    c.GetMessage(),
+			UpdateTime: ts(c.GetUpdateTime()),
+		}
+		if mc.Type == model.ConditionReady {
+			mc.UpdateTime = nil
+		}
+		out.Conditions = append(out.Conditions, mc)
 	}
 	return out
 }

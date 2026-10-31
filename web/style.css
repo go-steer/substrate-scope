@@ -1378,8 +1378,8 @@ code {
   --c: var(--ev-added);
 }
 
-.reason.r-ext {
-  --c: var(--ev-task);
+.reason.r-warn {
+  --c: var(--ev-crashed);
 }
 
 table.conds {

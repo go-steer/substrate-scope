@@ -34,12 +34,25 @@ const (
 	StateReverting   = "REVERTING"
 )
 
-// ax condition reasons the fork records on a task's Ready condition.
+// ax task condition types. Ready is ax's own, derived from the actor on
+// every read; AutoSuspended is the fork's (mastersingh24/ax): True when ax
+// suspended the task under spec.idle or spec.onCompletion, False once the
+// router has woken it again.
 const (
-	ReasonIdleSuspended      = "IdleSuspended"
+	ConditionReady         = "Ready"
+	ConditionAutoSuspended = "AutoSuspended"
+)
+
+// AutoSuspended reasons (ax fork).
+const (
+	// ReasonIdleSuspended: True; no requests for spec.idle.suspendAfter.
+	ReasonIdleSuspended = "IdleSuspended"
+	// ReasonCompletedSuspended: True; the command exited and
+	// spec.onCompletion is Suspend.
 	ReasonCompletedSuspended = "CompletedSuspended"
-	ReasonResumedByRequest   = "ResumedByRequest"
-	ReasonActorSuspended     = "ActorSuspended"
+	// ReasonResumedByRequest: False; the router resumed the task to deliver
+	// a request.
+	ReasonResumedByRequest = "ResumedByRequest"
 )
 
 // Agent is one Substrate actor, plus its ax task when it is one.
@@ -111,29 +124,40 @@ type Task struct {
 	// router when set.
 	HTTPPort   int32      `json:"httpPort,omitempty"`
 	CreateTime *time.Time `json:"createTime,omitempty"`
-	Workspaces []string   `json:"workspaces,omitempty"`
+	// Workspace is the name of the Workspace the task binds (spec.workspace),
+	// empty when it binds none.
+	Workspace string `json:"workspace,omitempty"`
 }
 
-// Ready returns the task's Ready condition, or nil.
-func (t *Task) Ready() *Condition {
+// Condition returns the task's condition of the given type, or nil.
+func (t *Task) Condition(typ string) *Condition {
 	if t == nil {
 		return nil
 	}
 	for i := range t.Conditions {
-		if t.Conditions[i].Type == "Ready" {
+		if t.Conditions[i].Type == typ {
 			return &t.Conditions[i]
 		}
 	}
 	return nil
 }
 
+// Ready returns the task's Ready condition, or nil.
+func (t *Task) Ready() *Condition { return t.Condition(ConditionReady) }
+
+// AutoSuspended returns the task's AutoSuspended condition, or nil.
+func (t *Task) AutoSuspended() *Condition { return t.Condition(ConditionAutoSuspended) }
+
 // Condition mirrors an ax task condition.
 type Condition struct {
-	Type               string     `json:"type"`
-	Status             string     `json:"status"`
-	Reason             string     `json:"reason,omitempty"`
-	Message            string     `json:"message,omitempty"`
-	LastTransitionTime *time.Time `json:"lastTransitionTime,omitempty"`
+	Type    string `json:"type"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
+	// UpdateTime is when ax last changed the condition. The collector
+	// leaves it empty on Ready, which ax mostly derives from the actor on
+	// every read, so its time would be the read's (see ax.ToTask).
+	UpdateTime *time.Time `json:"updateTime,omitempty"`
 }
 
 // Worker is a Substrate worker (a pod that hosts actors).

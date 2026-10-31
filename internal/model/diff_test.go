@@ -35,8 +35,18 @@ func agent(name, state string) *Agent {
 	return &Agent{Atespace: "cred-test", Name: name, State: state, StateSince: t0}
 }
 
+// withTask gives a an ax task whose Ready condition has the given reason.
 func withTask(a *Agent, reason string, at time.Time) *Agent {
-	a.Task = &Task{Phase: "Running", Conditions: []Condition{{Type: "Ready", Status: "True", Reason: reason, LastTransitionTime: &at}}}
+	a.Task = &Task{Phase: "Running", Conditions: []Condition{{Type: ConditionReady, Status: "True", Reason: reason, UpdateTime: &at}}}
+	return a
+}
+
+// withAuto adds the fork's AutoSuspended condition to a's task.
+func withAuto(a *Agent, status, reason string, at time.Time) *Agent {
+	if a.Task == nil {
+		withTask(a, "TaskRunning", t0)
+	}
+	a.Task.Conditions = append(a.Task.Conditions, Condition{Type: ConditionAutoSuspended, Status: status, Reason: reason, UpdateTime: &at})
 	return a
 }
 
@@ -117,9 +127,10 @@ func TestDiffCrashCarriesMessage(t *testing.T) {
 }
 
 func TestDiffWokeByRequest(t *testing.T) {
-	// Suspended since t0; ax recorded ResumedByRequest after that.
+	// Suspended since t0; ax turned AutoSuspended False with
+	// ResumedByRequest after that.
 	prev := agent("a", StateSuspended)
-	next := withTask(agent("a", StateRunning), ReasonResumedByRequest, t0.Add(time.Minute))
+	next := withAuto(agent("a", StateRunning), "False", ReasonResumedByRequest, t0.Add(time.Minute))
 	prev.Task = next.Task
 	ev := find(Diff(world(prev), world(next)), EventAgentWoke)
 	if ev == nil || ev.Reason != ReasonResumedByRequest {
@@ -127,39 +138,81 @@ func TestDiffWokeByRequest(t *testing.T) {
 	}
 }
 
-func TestDiffWokeIgnoresStaleReason(t *testing.T) {
-	// The ResumedByRequest on record is from an earlier wake, before the
-	// actor was last suspended: this wake's cause is unknown.
-	prev := agent("a", StateSuspended)
-	next := withTask(agent("a", StateRunning), ReasonResumedByRequest, t0.Add(-time.Hour))
-	prev.Task = next.Task
-	ev := find(Diff(world(prev), world(next)), EventAgentWoke)
-	if ev == nil || ev.Reason != "" {
-		t.Fatalf("woke event = %+v, want no reason", ev)
+func TestDiffWokeIgnoresStaleOrOtherReasons(t *testing.T) {
+	for name, next := range map[string]*Agent{
+		// From an earlier wake, before the actor was last suspended.
+		"stale": withAuto(agent("a", StateRunning), "False", ReasonResumedByRequest, t0.Add(-time.Hour)),
+		// ax hasn't seen the wake yet: still True from its suspend.
+		"still suspended": withAuto(agent("a", StateRunning), "True", ReasonIdleSuspended, t0.Add(time.Second)),
+		// The old fork's Ready reason is not read any more.
+		"ready reason": withTask(agent("a", StateRunning), ReasonResumedByRequest, t0.Add(time.Minute)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			prev := agent("a", StateSuspended)
+			prev.Task = next.Task
+			ev := find(Diff(world(prev), world(next)), EventAgentWoke)
+			if ev == nil || ev.Reason != "" {
+				t.Fatalf("woke event = %+v, want no reason", ev)
+			}
+		})
 	}
 }
 
 func TestDiffSuspendReason(t *testing.T) {
-	prev := agent("a", StateRunning)
-	next := withTask(agent("a", StateSuspending), ReasonIdleSuspended, t0.Add(10*time.Minute))
-	next.Task.Conditions[0].Status = "False"
-	prev.Task = next.Task
-	ev := find(Diff(world(prev), world(next)), EventAgentSuspended)
-	if ev == nil || ev.Reason != ReasonIdleSuspended {
-		t.Fatalf("suspended event = %+v, want IdleSuspended", ev)
+	for _, reason := range []string{ReasonIdleSuspended, ReasonCompletedSuspended} {
+		prev := agent("a", StateRunning)
+		next := withAuto(agent("a", StateSuspending), "True", reason, t0.Add(10*time.Minute))
+		prev.Task = next.Task
+		ev := find(Diff(world(prev), world(next)), EventAgentSuspended)
+		if ev == nil || ev.Reason != reason {
+			t.Fatalf("suspended event = %+v, want %s", ev, reason)
+		}
+	}
+}
+
+func TestDiffSuspendIgnoresStaleOrOtherReasons(t *testing.T) {
+	for name, next := range map[string]*Agent{
+		// ax's last suspend, before the actor was woken at t0: this
+		// suspend came from elsewhere.
+		"stale": withAuto(agent("a", StateSuspending), "True", ReasonIdleSuspended, t0.Add(-time.Hour)),
+		"woken": withAuto(agent("a", StateSuspending), "False", ReasonResumedByRequest, t0.Add(time.Second)),
+		// The old fork's Ready reason is not read any more.
+		"ready reason": withTask(agent("a", StateSuspending), ReasonIdleSuspended, t0.Add(time.Minute)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			prev := agent("a", StateRunning)
+			prev.Task = next.Task
+			ev := find(Diff(world(prev), world(next)), EventAgentSuspended)
+			if ev == nil || ev.Reason != "" {
+				t.Fatalf("suspended event = %+v, want no reason", ev)
+			}
+		})
 	}
 }
 
 func TestDiffLateReasonArrivesAsTaskUpdate(t *testing.T) {
-	// The actor suspended on one poll; ax's reason shows up on a later one.
-	prev := withTask(agent("a", StateSuspended), "TaskRunning", t0)
-	next := withTask(agent("a", StateSuspended), ReasonIdleSuspended, t0.Add(time.Second))
+	// The actor suspended on one poll; ax's reason shows up on a later one,
+	// along with the Ready reason that follows the phase. AutoSuspended is
+	// the one reported.
+	prev := withAuto(withTask(agent("a", StateSuspended), "TaskRunning", t0), "False", ReasonResumedByRequest, t0)
+	next := withAuto(withTask(agent("a", StateSuspended), "Suspended", t0), "True", ReasonIdleSuspended, t0.Add(time.Second))
 	evs := Diff(world(prev), world(next))
 	if got := types(evs); !reflect.DeepEqual(got, []string{EventTaskUpdated}) {
 		t.Fatalf("events = %v", got)
 	}
 	if evs[0].Reason != ReasonIdleSuspended || evs[0].New {
 		t.Fatalf("task_updated = %+v", evs[0])
+	}
+}
+
+func TestDiffTaskUpdateReadyReason(t *testing.T) {
+	// No AutoSuspended change: the Ready reason is reported, e.g. ax losing
+	// Substrate.
+	prev := withAuto(withTask(agent("a", StateRunning), "TaskRunning", t0), "False", ReasonResumedByRequest, t0)
+	next := withAuto(withTask(agent("a", StateRunning), "SubstrateUnavailable", t0), "False", ReasonResumedByRequest, t0)
+	ev := find(Diff(world(prev), world(next)), EventTaskUpdated)
+	if ev == nil || ev.Reason != "SubstrateUnavailable" {
+		t.Fatalf("task_updated = %+v", ev)
 	}
 }
 

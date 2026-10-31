@@ -1,8 +1,11 @@
-// Vendored from github.com/mastersingh24/ax (branch task-idle-suspend-fix, b0d3b11),
-// a fork of github.com/google/ax adding TaskSpec.idle, TaskSpec.on_completion,
-// TaskSpec.egress, TaskSpec.http and TaskStatus.conditions. AX's API is
-// v1alpha1; re-copy and regenerate (go generate ./internal/axapi) when it
-// changes. Only go_package differs from the original.
+// Vendored from github.com/mastersingh24/ax (tag substrate-v1-12dbe16, commit
+// 12dbe163b207888b743b10705d5ce26c8f5c2697: upstream google/ax f0228f1 plus
+// the fork's patch stack for Substrate v1.0.0-rc.1). The fork adds
+// TaskSpec.egress, http, idle and on_completion as fields 100-103, so an
+// upstream addition can't collide with them, and the AutoSuspended
+// condition. AX's API is v1alpha1; re-copy and regenerate
+// (go generate ./internal/axapi) when it changes. Only go_package differs
+// from the original.
 
 // Copyright 2026 Google LLC
 //
@@ -46,7 +49,6 @@ const (
 	AX_DeleteTask_FullMethodName      = "/ax.v1alpha1.AX/DeleteTask"
 	AX_SuspendTask_FullMethodName     = "/ax.v1alpha1.AX/SuspendTask"
 	AX_ResumeTask_FullMethodName      = "/ax.v1alpha1.AX/ResumeTask"
-	AX_WatchTask_FullMethodName       = "/ax.v1alpha1.AX/WatchTask"
 	AX_GetWorkspace_FullMethodName    = "/ax.v1alpha1.AX/GetWorkspace"
 	AX_ListWorkspaces_FullMethodName  = "/ax.v1alpha1.AX/ListWorkspaces"
 	AX_UpdateWorkspace_FullMethodName = "/ax.v1alpha1.AX/UpdateWorkspace"
@@ -70,7 +72,6 @@ type AXClient interface {
 	DeleteTask(ctx context.Context, in *DeleteTaskRequest, opts ...grpc.CallOption) (*DeleteTaskResponse, error)
 	SuspendTask(ctx context.Context, in *SuspendTaskRequest, opts ...grpc.CallOption) (*Task, error)
 	ResumeTask(ctx context.Context, in *ResumeTaskRequest, opts ...grpc.CallOption) (*Task, error)
-	WatchTask(ctx context.Context, in *WatchTaskRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchTaskResponse], error)
 	// Workspaces
 	GetWorkspace(ctx context.Context, in *GetWorkspaceRequest, opts ...grpc.CallOption) (*Workspace, error)
 	ListWorkspaces(ctx context.Context, in *ListWorkspacesRequest, opts ...grpc.CallOption) (*ListWorkspacesResponse, error)
@@ -150,25 +151,6 @@ func (c *aXClient) ResumeTask(ctx context.Context, in *ResumeTaskRequest, opts .
 	}
 	return out, nil
 }
-
-func (c *aXClient) WatchTask(ctx context.Context, in *WatchTaskRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchTaskResponse], error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &AX_ServiceDesc.Streams[0], AX_WatchTask_FullMethodName, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	x := &grpc.GenericClientStream[WatchTaskRequest, WatchTaskResponse]{ClientStream: stream}
-	if err := x.ClientStream.SendMsg(in); err != nil {
-		return nil, err
-	}
-	if err := x.ClientStream.CloseSend(); err != nil {
-		return nil, err
-	}
-	return x, nil
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type AX_WatchTaskClient = grpc.ServerStreamingClient[WatchTaskResponse]
 
 func (c *aXClient) GetWorkspace(ctx context.Context, in *GetWorkspaceRequest, opts ...grpc.CallOption) (*Workspace, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -263,7 +245,6 @@ type AXServer interface {
 	DeleteTask(context.Context, *DeleteTaskRequest) (*DeleteTaskResponse, error)
 	SuspendTask(context.Context, *SuspendTaskRequest) (*Task, error)
 	ResumeTask(context.Context, *ResumeTaskRequest) (*Task, error)
-	WatchTask(*WatchTaskRequest, grpc.ServerStreamingServer[WatchTaskResponse]) error
 	// Workspaces
 	GetWorkspace(context.Context, *GetWorkspaceRequest) (*Workspace, error)
 	ListWorkspaces(context.Context, *ListWorkspacesRequest) (*ListWorkspacesResponse, error)
@@ -301,9 +282,6 @@ func (UnimplementedAXServer) SuspendTask(context.Context, *SuspendTaskRequest) (
 }
 func (UnimplementedAXServer) ResumeTask(context.Context, *ResumeTaskRequest) (*Task, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResumeTask not implemented")
-}
-func (UnimplementedAXServer) WatchTask(*WatchTaskRequest, grpc.ServerStreamingServer[WatchTaskResponse]) error {
-	return status.Error(codes.Unimplemented, "method WatchTask not implemented")
 }
 func (UnimplementedAXServer) GetWorkspace(context.Context, *GetWorkspaceRequest) (*Workspace, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetWorkspace not implemented")
@@ -457,17 +435,6 @@ func _AX_ResumeTask_Handler(srv interface{}, ctx context.Context, dec func(inter
 	}
 	return interceptor(ctx, in, info, handler)
 }
-
-func _AX_WatchTask_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(WatchTaskRequest)
-	if err := stream.RecvMsg(m); err != nil {
-		return err
-	}
-	return srv.(AXServer).WatchTask(m, &grpc.GenericServerStream[WatchTaskRequest, WatchTaskResponse]{ServerStream: stream})
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type AX_WatchTaskServer = grpc.ServerStreamingServer[WatchTaskResponse]
 
 func _AX_GetWorkspace_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetWorkspaceRequest)
@@ -677,12 +644,6 @@ var AX_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _AX_DeleteModel_Handler,
 		},
 	},
-	Streams: []grpc.StreamDesc{
-		{
-			StreamName:    "WatchTask",
-			Handler:       _AX_WatchTask_Handler,
-			ServerStreams: true,
-		},
-	},
+	Streams:  []grpc.StreamDesc{},
 	Metadata: "ax.proto",
 }

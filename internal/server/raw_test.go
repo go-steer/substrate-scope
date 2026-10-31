@@ -60,8 +60,12 @@ func TestRawObjects(t *testing.T) {
 		Actors: map[string][]model.Agent{"cred-test": {
 			{Atespace: "cred-test", Name: "run-actor", State: model.StateSuspended},
 			{Atespace: "cred-test", Name: "plain", State: model.StateRunning},
+			{Atespace: "cred-test", Name: "lost", State: model.StateRunning},
 		}},
-		Tasks: map[string]map[string]model.Task{"cred-test": {"run-actor": {Name: "run", Phase: "Suspended", Workspaces: []string{"repo", "gone"}}}},
+		Tasks: map[string]map[string]model.Task{"cred-test": {
+			"run-actor": {Name: "run", Phase: "Suspended", Workspace: "repo"},
+			"lost":      {Name: "lost", Phase: "Running", Workspace: "gone"},
+		}},
 	})
 	f := &fakeRaw{}
 	srv := httptest.NewServer(New(Options{Store: store, RawActors: f, RawTasks: f}))
@@ -87,13 +91,18 @@ func TestRawObjects(t *testing.T) {
 	for _, o := range d.Objects {
 		got = append(got, o.Section+" "+o.Kind+" "+o.Name+" "+o.Error)
 	}
-	want := []string{"substrate Actor run-actor ", "task Task run ", "task Workspace repo ", "task Workspace gone not found"}
+	want := []string{"substrate Actor run-actor ", "task Task run ", "task Workspace repo "}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("objects:\n got %q\nwant %q", got, want)
 	}
 	// The task is read by its own name, not the actor's.
 	if f.gets[1] != "task cred-test/run" {
 		t.Errorf("reads: %q", f.gets)
+	}
+
+	// A workspace that can't be read carries its error.
+	if code := getJSON(t, srv.URL+"/api/agents/cred-test/lost/raw", &d); code != http.StatusOK || len(d.Objects) != 3 || d.Objects[2].Kind != "Workspace" || d.Objects[2].Error != "not found" {
+		t.Errorf("lost: %d %+v", code, d)
 	}
 
 	// Not an ax task: only the actor.
